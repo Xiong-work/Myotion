@@ -2,6 +2,7 @@ import c3d
 import numpy as np
 from .logger import *
 from .timeSeriesTable import *
+from .trial import TrialEvent
 
 
 class point:
@@ -228,8 +229,112 @@ class c3dFile:
             "analog": self.analogdata,  # collection of analogdata
         }
 
+        # Trial events embedded in the C3D file (always safe; returns [] if absent)
+        self.events = self._extract_events()
+        # Force plate corner geometry — list of [4×3] arrays, one per plate in order
+        self.force_corners = self._extract_force_corners()
+
+    def _extract_force_corners(self):
+        """Read FORCE_PLATFORM:CORNERS and return a list of [4×3] corner arrays.
+
+        Returns [] if the parameter is absent or unrecognised — never raises.
+        Each entry is a float64 ndarray of shape (4, 3): four corners in C3D lab
+        frame (mm).
+
+        Implementation note: param.float_value in the c3d library only reads a
+        single scalar.  The raw bytes + param.dimensions are used instead with
+        Fortran-order (column-major) reshape, matching C3D parameter storage.
+        """
+        try:
+            param = self.reader.get("FORCE_PLATFORM:CORNERS")
+            if param is None or not param.dimensions:
+                return []
+            total = 1
+            for d in param.dimensions:
+                total *= d
+            raw = np.frombuffer(param.bytes, dtype=np.float32)
+            if raw.size < total:
+                return []
+            # Fortran-order reshape: dimensions=[3, 4, N] → shape (3, 4, N)
+            arr = raw[:total].reshape(param.dimensions, order="F").astype(float)
+            if arr.ndim == 3 and arr.shape[0] == 3 and arr.shape[1] == 4:
+                # (3_coords, 4_corners, N_plates) — standard C3D layout
+                return [arr[:, :, i].T for i in range(arr.shape[2])]
+            if arr.ndim == 2 and arr.shape[0] == 3 and arr.shape[1] == 4:
+                # Single plate: (3, 4)
+                return [arr.T]
+            return []
+        except Exception as ex:
+            logger.warning("FORCE_PLATFORM:CORNERS extraction failed: {}".format(ex))
+            return []
+
+    def _extract_events(self):
+        """Read C3D EVENT:* parameters and return a sorted list of TrialEvent.
+
+        Returns [] if the parameters are absent or malformed — never raises.
+        """
+        try:
+            used_param = self.reader.get("EVENT:USED")
+            if used_param is None:
+                return []
+            n = int(used_param.int16_value)
+            if n <= 0:
+                return []
+
+            times_param = self.reader.get("EVENT:TIMES")
+            if times_param is None:
+                return []
+
+            # C3D spec: EVENT:TIMES is [2 x n] where row [1] holds seconds.
+            # Some exporters store it flat; handle both.
+            times_raw = np.asarray(times_param.float_value)
+            if times_raw.ndim == 2:
+                times = times_raw[1].flatten()
+            else:
+                times = times_raw.flatten()
+
+            def _str_list(param):
+                if param is None:
+                    return []
+                try:
+                    v = param.string_value
+                    if isinstance(v, str):
+                        return [v.strip()]
+                    if isinstance(v, bytes):
+                        return [v.decode("utf-8", errors="replace").strip()]
+                    arr = np.asarray(v)
+                    return [
+                        s.strip() if isinstance(s, str)
+                        else s.decode("utf-8", errors="replace").strip()
+                        for s in arr.flatten()
+                    ]
+                except Exception:
+                    return []
+
+            labels = _str_list(self.reader.get("EVENT:LABELS"))
+            contexts = _str_list(self.reader.get("EVENT:CONTEXTS"))
+
+            events = []
+            for i in range(min(n, len(times))):
+                events.append(TrialEvent(
+                    time_s=float(times[i]),
+                    label=labels[i] if i < len(labels) else "",
+                    context=contexts[i] if i < len(contexts) else "",
+                ))
+            events.sort(key=lambda e: e.time_s)
+
+            if events:
+                logger.info("C3D events ({}): {}".format(len(events), events))
+            return events
+
+        except Exception as ex:
+            logger.warning("C3D event extraction skipped: {}".format(ex))
+            return []
+
     def __del__(self):
-        fh = getattr(self, "_fh", None)
+        # Use __dict__ directly to avoid triggering __getattr__ when _fh or
+        # data were never set (e.g. init failed before self.data was assigned).
+        fh = self.__dict__.get("_fh", None)
         if fh is not None and not fh.closed:
             fh.close()
 

@@ -12,8 +12,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QFrame,
     QComboBox,
+    QCheckBox,
 )
-from PySide6.QtCore import Qt, QPoint, QRect
+from PySide6.QtCore import Qt, QPoint, QRect, Signal
 
 
 class State(Enum):
@@ -216,6 +217,8 @@ PauseIcon = ":/icons/images/icons/cil-media-pause.png"
 
 
 class PlayBarWidget(QWidget):
+    eventMarkRequested = Signal()  # emitted when user clicks "Mark Event"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.initui(parent)
@@ -251,12 +254,21 @@ class PlayBarWidget(QWidget):
         self.step = QComboBox(self.button_group)
         self.step.addItems([self.tr("Increment"), "5", "10", "20", "50", "100"])
 
+        self.markEventButton = QPushButton(self.tr("Mark Event"), self.button_group)
+        self.markEventButton.setStyleSheet(buttonStyle)
+        self.markEventButton.clicked.connect(self.eventMarkRequested)
+
+        self.filterCheck = QCheckBox(self.tr("Filter"), self.button_group)
+        self.filterCheck.setChecked(True)  # filtering on by default
+
         hboxlayout = QHBoxLayout(self.button_group)
         hboxlayout.addStretch()
         hboxlayout.addWidget(self.prevFrameButton)
         hboxlayout.addWidget(self.playbutton)
         hboxlayout.addWidget(self.nextFrameButton)
         hboxlayout.addWidget(self.step)
+        hboxlayout.addWidget(self.markEventButton)
+        hboxlayout.addWidget(self.filterCheck)
         hboxlayout.addStretch()
         vboxlayout.addWidget(self.slider)
         vboxlayout.addWidget(self.current_frame_label)

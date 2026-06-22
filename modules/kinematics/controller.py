@@ -1,11 +1,13 @@
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QVBoxLayout
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtWidgets import QVBoxLayout, QInputDialog, QMenu, QTreeWidgetItem
 import numpy as np
+import scipy.signal as _sig
 
 from modules.kinematics.model import Model
 from modules.kinematics.playbarwidget import PlayBarWidget
 from modules.kinematics.playplotview import PlayPlotWidget
 from modules.kinematics.renderwidget import RenderWidget
+from modules.pyMotion.core.trial import TrialEvent
 
 
 class Controller:
@@ -22,6 +24,7 @@ class Controller:
         top: PlayPlotWidget,
         bottom: QVBoxLayout,
         labeltree,
+        participant_item=None,
     ) -> None:
         self.model = model
         self.frame = 0
@@ -30,6 +33,7 @@ class Controller:
         self.top = top
         self.bottom = bottom
         self.labeltree = labeltree
+        self.participant_item = participant_item  # QTreeWidgetItem for the active participant
 
         self.render.setModel(model.kinematic)
         self.render.setController(self)
@@ -42,13 +46,31 @@ class Controller:
         self.playbar.prevFrameButton.clicked.connect(self.on_prev_frame_button_clicked)
         self.playbar.nextFrameButton.clicked.connect(self.on_next_frame_button_clicked)
         self.playbar.step.currentTextChanged.connect(self.on_combo_box_changed)
+        self.playbar.eventMarkRequested.connect(self._onMarkEvent)
         self.step = 1
         self.labeltree.itemDoubleClicked.connect(self.tree_item_select)
 
+        # Right-click on label tree → delete event
+        self.labeltree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.labeltree.customContextMenuRequested.connect(self._on_tree_context_menu)
+        self._event_tree_root = None
+
         self.timer = QTimer()
         self.timer.start(int(1000 / self.model.kinematic_frame_rate()))
-
         self.timer.timeout.connect(self.update)
+
+        # Populate event tree and draw C3D events already in model
+        self._refresh_event_tree()
+        for ev in self.model.events:
+            self.top.add_event(ev)
+
+        # Build force-channel lookup so tree_item_select() can find plate data.
+        # Tree nodes are added by populateKinematicTree() in main.py under the
+        # participant item, so the controller never writes to the tree directly.
+        self._force_channels = {}
+        for fp in self.model.force_plates:
+            for comp in ("Fx", "Fy", "Fz"):
+                self._force_channels["Plate{} {}".format(fp.plate_id, comp)] = (fp, comp)
 
     def update(self):
         if self.playbar.is_playing():
@@ -100,6 +122,7 @@ class Controller:
             return
         self.top.clear()
         name = index.text(0)
+        do_filter = self.playbar.filterCheck.isChecked()
         if name in self.model.kinematic.data.data:
             d = self.model.kinematic.data[name]
             xs, ys, zs = [], [], []
@@ -107,12 +130,152 @@ class Controller:
                 xs.append(p.xyz[0])
                 ys.append(p.xyz[2])
                 zs.append(p.xyz[1])
+            fs = self.model.kinematic.point_fs
+            if do_filter:
+                xs = self._apply_filter(xs, fs, cutoff_hz=6.0, order=2)
+                ys = self._apply_filter(ys, fs, cutoff_hz=6.0, order=2)
+                zs = self._apply_filter(zs, fs, cutoff_hz=6.0, order=2)
             self.top.add_line(np.arange(0, len(xs)), xs, name + ".x")
             self.top.add_line(np.arange(0, len(ys)), ys, name + ".y")
             self.top.add_line(np.arange(0, len(zs)), zs, name + ".z")
         if name in self.model.emg.Channels:
+            # EMG data has its own processing pipeline — no additional filtering here
             x = self.model.emg.getLinspace()
             y = self.model.emg[name]
             rate = self.model.kinematic.point_fs
             self.top.add_line(x, y, name, 'channel', rate)
+        # Force plate channel click — plot the selected component over time
+        if name in self._force_channels:
+            fp, attr = self._force_channels[name]
+            data = np.asarray(getattr(fp, attr), dtype=float)
+            if do_filter:
+                data = self._apply_filter(data, fp.fs, cutoff_hz=10.0, order=4)
+            x_time = list(np.arange(len(data)) / fp.fs)
+            point_fs = self.model.kinematic.point_fs
+            self.top.add_line(x_time, list(data), name, "channel", point_fs)
+        # Re-draw events on the freshly populated plots
+        for ev in self.model.events:
+            self.top.add_event(ev)
+
+    @staticmethod
+    def _apply_filter(data, fs, cutoff_hz, order):
+        """Zero-phase Butterworth low-pass filter.
+
+        Returns filtered data as a numpy array, or the original data unchanged
+        if the signal is too short, the sampling rate is unknown, or the cutoff
+        is at or above the Nyquist frequency.
+
+        Args:
+            data:       array-like signal samples
+            fs:         sampling frequency in Hz
+            cutoff_hz:  cutoff frequency in Hz
+            order:      filter order
+        """
+        arr = np.asarray(data, dtype=float)
+        if fs <= 0 or len(arr) < 3 * (order + 1):
+            return arr
+        wn = cutoff_hz / (fs / 2.0)
+        if wn >= 1.0:
+            return arr  # cutoff at or above Nyquist — nothing to filter
+        try:
+            b, a = _sig.butter(order, wn, btype='low')
+            return _sig.filtfilt(b, a, arr)
+        except Exception:
+            return arr
+
+    # ------------------------------------------------------------------
+    # Event creation / deletion
+    # ------------------------------------------------------------------
+
+    def _onMarkEvent(self):
+        """Create a new TrialEvent at the current playback position."""
+        fps = self.model.kinematic_frame_rate()
+        time_s = self.frame / fps
+
+        label, ok = QInputDialog.getText(
+            None,
+            self.labeltree.tr("Mark Event"),
+            self.labeltree.tr("Label (at {:.3f} s):").format(time_s),
+            text="Event",
+        )
+        if not ok or not label.strip():
+            return
+
+        ctx, ok2 = QInputDialog.getItem(
+            None,
+            self.labeltree.tr("Event Context"),
+            self.labeltree.tr("Context:"),
+            ["General", "Left", "Right"],
+            0,
+            False,
+        )
+        if not ok2:
+            ctx = "General"
+
+        event = TrialEvent(time_s, label.strip(), ctx)
+        self.model.extra_events.append(event)
+        self.model.events.append(event)
+        self.model.events.sort(key=lambda e: e.time_s)
+        self.top.add_event(event)
+        self._refresh_event_tree()
+
+    def _delete_event(self, event):
+        """Remove an event from the model and the plot."""
+        if event in self.model.extra_events:
+            self.model.extra_events.remove(event)
+        if event in self.model.events:
+            self.model.events.remove(event)
+        self.top.remove_event(event)
+        self._refresh_event_tree()
+
+    def _refresh_event_tree(self):
+        """Rebuild the 'Events' node inside the participant's tree item."""
+        # Remove old node — it is now a child of participant_item, not a top-level item
+        if self._event_tree_root is not None:
+            parent = self._event_tree_root.parent()
+            if parent is not None:
+                parent.removeChild(self._event_tree_root)
+            else:
+                # Fallback: might be top-level if participant_item was None
+                idx = self.labeltree.indexOfTopLevelItem(self._event_tree_root)
+                if idx >= 0:
+                    self.labeltree.takeTopLevelItem(idx)
+            self._event_tree_root = None
+
+        if not self.model.events:
+            return
+
+        root = QTreeWidgetItem(["Events ({})".format(len(self.model.events))])
+        for ev in self.model.events:
+            source = "" if ev in self.model.extra_events else " [C3D]"
+            child_label = "{} | {} | {:.3f}s{}".format(
+                ev.label, ev.context, ev.time_s, source
+            )
+            QTreeWidgetItem(root, [child_label])
+
+        if self.participant_item is not None:
+            self.participant_item.addChild(root)
+        else:
+            self.labeltree.addTopLevelItem(root)  # graceful fallback
+
+        root.setExpanded(True)
+        self._event_tree_root = root
+
+    def _on_tree_context_menu(self, pos):
+        """Right-click in label tree: offer Delete for user-created event items."""
+        item = self.labeltree.itemAt(pos)
+        if item is None or item.parent() is not self._event_tree_root:
+            return
+        idx = self._event_tree_root.indexOfChild(item)
+        if idx < 0 or idx >= len(self.model.events):
+            return
+        event = self.model.events[idx]
+        # Only allow deleting user-created events (not C3D-sourced ones)
+        if event not in self.model.extra_events:
+            return
+        menu = QMenu()
+        delete_action = menu.addAction("Delete: {}".format(event.label))
+        action = menu.exec(self.labeltree.viewport().mapToGlobal(pos))
+        if action == delete_action:
+            self._delete_event(event)
 

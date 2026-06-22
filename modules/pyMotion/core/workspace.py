@@ -24,6 +24,7 @@ class workspace:
             self.report = None
             self.kinematic = kin
             self.loading = False
+            self.extra_events = []  # user-created TrialEvents, persisted to workspace XML
 
         def isLoading(self):
             return self.loading
@@ -47,6 +48,15 @@ class workspace:
             if self.report != None:
                 # add report location to xml
                 root.addNode("report", xmlString(self.report.getPath()))
+            if self.extra_events:
+                events_node = xmlElement("events")
+                for ev in self.extra_events:
+                    e = xmlElement("event")
+                    e.addNode("time", xmlString(ev.time_s))
+                    e.addNode("label", xmlString(ev.label))
+                    e.addNode("context", xmlString(ev.context))
+                    events_node.addSubTree(e)
+                root.addSubTree(events_node)
             return root
 
         @staticmethod
@@ -73,6 +83,21 @@ class workspace:
             profile_obj.emg = emg_obj
             profile_obj.kin = None
             profile_obj.report = report_obj
+            # Restore user-created events from XML
+            profile_obj.extra_events = []
+            events_node = root.find("events")
+            if events_node is not None:
+                for ev_el in events_node:
+                    try:
+                        t_el = ev_el.find("time")
+                        l_el = ev_el.find("label")
+                        c_el = ev_el.find("context")
+                        t = float(t_el.text) if t_el is not None and t_el.text else 0.0
+                        l = l_el.text.strip() if l_el is not None and l_el.text else ""
+                        c = c_el.text.strip() if c_el is not None and c_el.text else ""
+                        profile_obj.extra_events.append(TrialEvent(t, l, c))
+                    except Exception:
+                        pass
             return profile_obj
 
     class reportEMGConfig:
