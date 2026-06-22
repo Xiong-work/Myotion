@@ -38,9 +38,6 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QHBoxLayout,
-    QVBoxLayout,
-    QProgressDialog,
-    QInputDialog,
 )
 from PySide6.QtWebEngineCore import QWebEngineUrlScheme
 
@@ -58,12 +55,6 @@ os.environ["QT_FONT_DPI"] = "96"  # FIX Problem for High DPI and Scale above 100
 # SET AS GLOBAL WIDGETS
 # ///////////////////////////////////////////////////////////////
 widgets = None
-<<<<<<< HEAD
-=======
-perm = None
-# Development switch: launch directly without requiring sign-in.
-BYPASS_LOGIN_FOR_DEV = True
->>>>>>> 3fac42d (fixed window sizing and login bypass)
 
 
 # Global Constant
@@ -820,8 +811,17 @@ class MainWindow(QMainWindow):
         self.sigAsyncLoadError.connect(self.handleAsyncLoadError)
         widgets.treeView.doubleClicked.connect(self.handleTreeViewDoubleClick)
 
-        # General
+        # Menu bar
+        widgets.fileMenu.clicked.connect(self.fileMenuClick)
+        widgets.displayMenu.clicked.connect(self.displayMenuClick)
+        widgets.toolsMenu.clicked.connect(self.underDevelopmentClick)
         widgets.settingsMenu.clicked.connect(self.configButtonClick)
+        widgets.helpMenu.clicked.connect(self.underDevelopmentClick)
+
+        # Quick Start buttons on the start page.
+        widgets.pushButton_2.clicked.connect(self.underDevelopmentClick)
+        widgets.pushButton_3.clicked.connect(self.underDevelopmentClick)
+        widgets.pushButton_4.clicked.connect(self.underDevelopmentClick)
 
         # EMG Page
         widgets.pushButton_10.clicked.connect(self.addEMGButtonClick)
@@ -945,76 +945,92 @@ class MainWindow(QMainWindow):
 
         # self.test()
 
-<<<<<<< HEAD
         # 添加自动保存定时器
-=======
-        # Permission widget setup
-        perm.register(widgets.topMenu, permission.BASIC)  # menu page
-        perm.register(widgets.extraTopMenu, permission.BASIC)  # workspace page
-        if BYPASS_LOGIN_FOR_DEV:
-            self.account = Account("", "")
-            widgets.subtitle_label.setText("Welcome to MSK workplace (dev mode)")
-            widgets.settingsTopBtn.setText("Developer")
-            widgets.settingsTopBtn.show()
-            widgets.frame_64.hide()
-            perm.setPermLevel(permission.BASIC)
-        else:
-            perm.setPermLevel(permission.LOGOUT)
-
-        # Add auto-save timer.
->>>>>>> 3fac42d (fixed window sizing and login bypass)
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.autoSaveHandler)
         self.autosave_interval = 60000  # 1 minute (milliseconds)
 
-    def applyModernWidgetStyle(self):
+    # Palette tokens for each theme mode.
+    _THEME_PALETTES = {
+        "dark": {
+            "label":            "rgb(222, 226, 234)",
+            "title":            "rgb(245, 247, 250)",
+            "subtitle":         "rgb(182, 188, 199)",
+            "btn_bg":           "rgb(46,  52,  63)",
+            "btn_border":       "rgb(62,  68,  82)",
+            "btn_text":         "rgb(236, 239, 244)",
+            "btn_hover":        "rgb(58,  65,  79)",
+            "btn_pressed":      "rgb(38,  43,  54)",
+            "btn_dis_text":     "rgb(145, 150, 162)",
+            "btn_dis_bg":       "rgb(40,  44,  53)",
+            "btn_dis_border":   "rgb(55,  60,  72)",
+        },
+        "light": {
+            "label":            "#44475a",
+            "title":            "#282a36",
+            "subtitle":         "#6272a4",
+            "btn_bg":           "#44475a",
+            "btn_border":       "#282a36",
+            "btn_text":         "#f8f8f2",
+            "btn_hover":        "#6272a4",
+            "btn_pressed":      "#282a36",
+            "btn_dis_text":     "#f8f8f2",
+            "btn_dis_bg":       "#9faeda",
+            "btn_dis_border":   "#7d8fba",
+        },
+    }
+
+    def applyModernWidgetStyle(self, mode: str = "dark"):
         self.setFont(QFont("Segoe UI", 10))
 
-        # Keep style updates scoped to content pages so navigation/title-bar styles stay intact.
-        base_style = self.ui.styleSheet.styleSheet()
-        modern_style = """
-#contentBottom QLabel {
+        p = self._THEME_PALETTES.get(mode, self._THEME_PALETTES["dark"])
+
+        # Structural + color rules scoped to the content area.
+        modern_style = f"""
+#contentBottom QLabel {{
     font-family: "Segoe UI";
     font-size: 10pt;
-    color: rgb(222, 226, 234);
-}
+    color: {p['label']};
+}}
 
-#contentBottom QLabel#title_label {
+#contentBottom QLabel#title_label {{
     font-family: "Segoe UI Semibold";
     font-size: 20pt;
-    color: rgb(245, 247, 250);
-}
+    color: {p['title']};
+}}
 
-#contentBottom QLabel#subtitle_label {
+#contentBottom QLabel#subtitle_label {{
     font-family: "Segoe UI";
     font-size: 11pt;
-    color: rgb(182, 188, 199);
-}
+    color: {p['subtitle']};
+}}
 
-#contentBottom QPushButton {
+#contentBottom QPushButton {{
     font-family: "Segoe UI Semibold";
     font-size: 10pt;
     padding: 6px 12px;
     border-radius: 10px;
-    border: 1px solid rgb(62, 68, 82);
-    background-color: rgb(46, 52, 63);
-    color: rgb(236, 239, 244);
-}
+    border: 1px solid {p['btn_border']};
+    background-color: {p['btn_bg']};
+    color: {p['btn_text']};
+}}
 
-#contentBottom QPushButton:hover {
-    background-color: rgb(58, 65, 79);
-}
+#contentBottom QPushButton:hover {{
+    background-color: {p['btn_hover']};
+}}
 
-#contentBottom QPushButton:pressed {
-    background-color: rgb(38, 43, 54);
-}
+#contentBottom QPushButton:pressed {{
+    background-color: {p['btn_pressed']};
+}}
 
-#contentBottom QPushButton:disabled {
-    color: rgb(145, 150, 162);
-    background-color: rgb(40, 44, 53);
-    border: 1px solid rgb(55, 60, 72);
-}
+#contentBottom QPushButton:disabled {{
+    color: {p['btn_dis_text']};
+    background-color: {p['btn_dis_bg']};
+    border: 1px solid {p['btn_dis_border']};
+}}
 """
+        # Append to whatever the current base QSS is so theme chrome is not lost.
+        base_style = self.ui.styleSheet.styleSheet()
         self.ui.styleSheet.setStyleSheet(base_style + "\n" + modern_style)
 
     def handleAsyncLoadError(self, error_msg):
@@ -1198,51 +1214,10 @@ class MainWindow(QMainWindow):
         logger.info(f'Button "{btnName}" pressed!')
 
     def login_click(self):
-<<<<<<< HEAD
         return
 
     def logout_click(self):
         return
-=======
-        if BYPASS_LOGIN_FOR_DEV:
-            return
-
-        dlg = LoginDialog()
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self.account = Account(dlg.ui.lineEdit.text(), dlg.ui.lineEdit_2.text())
-            self.account.key_from_json(dlg.user)
-            widgets.subtitle_label.setText(
-                "Welcome to MSK workplace, " + dlg.ui.lineEdit.text()
-            )
-            widgets.settingsTopBtn.setText(dlg.ui.lineEdit.text())
-            widgets.settingsTopBtn.show()
-            widgets.frame_64.hide()
-            perm.setPermLevel(permission.BASIC)
-            perm.startServerHeartbeat(self.account)
-
-    def logout_click(self):
-        if BYPASS_LOGIN_FOR_DEV:
-            return
-
-        # check old project saved
-        if self.ifOldProjectOpened():
-            return -1
-
-        # switch to home page
-        widgets.stackedWidget.setCurrentWidget(widgets.start_page)
-
-        widgets.title_label.setText("Let's get started!")
-        widgets.subtitle_label.setText(
-            "Welcome to MSK workplace, sign in to start using"
-        )
-        widgets.settingsTopBtn.hide()
-        widgets.frame_64.show()
-
-        if self.account is not None and len(self.account.username):
-            bm.logout(self.account.username, self.account.password)
-        perm.setPermLevel(permission.LOGOUT)
-        perm.stopServerHeartbeat()
->>>>>>> 3fac42d (fixed window sizing and login bypass)
 
     # RESIZE EVENTS
     # ///////////////////////////////////////////////////////////////
@@ -1298,6 +1273,52 @@ class MainWindow(QMainWindow):
 
     def configButtonClick(self):
         rc = ConfigWindow(1200, 800).run()
+
+    def underDevelopmentClick(self):
+        """Show a notice for features that are not yet implemented."""
+        mb = QMessageBox(self)
+        mb.setWindowTitle(self.tr("Under Development"))
+        mb.setIcon(QMessageBox.Icon.Information)
+        mb.setText(self.tr("This feature is still under development."))
+        mb.setInformativeText(self.tr("It will be available in a future release."))
+        mb.setStandardButtons(QMessageBox.StandardButton.Ok)
+        mb.exec()
+
+    def fileMenuClick(self):
+        """Drop-down under the File menu button."""
+        menu = QMenu(self)
+        menu.addAction(self.tr("New Workspace"),  self.newProjectButtonClick)
+        menu.addAction(self.tr("Load Workspace"), self.loadProjectButtonClick)
+        # Pop the menu directly below the button.
+        btn = widgets.fileMenu
+        menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+
+    def displayMenuClick(self):
+        """Drop-down under the Display menu button for theme selection."""
+        menu = QMenu(self)
+        menu.addAction(self.tr("Dark Theme"),  lambda: self.applyTheme("dark"))
+        menu.addAction(self.tr("Light Theme"), lambda: self.applyTheme("light"))
+        btn = widgets.displayMenu
+        menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+
+    def applyTheme(self, mode: str):
+        """Load the QSS theme file then re-apply modern widget palette for contrast."""
+        themes_dir = os.path.join(os.path.dirname(__file__), "themes")
+        if mode == "dark":
+            qss_path = os.path.join(themes_dir, "py_dracula_dark.qss")
+        elif mode == "light":
+            qss_path = os.path.join(themes_dir, "py_dracula_light.qss")
+        else:
+            return  # unknown mode — no-op
+        try:
+            with open(qss_path, "r", encoding="utf-8") as f:
+                qss = f.read()
+            # Set the theme base first, then append mode-aware contrast rules.
+            self.ui.styleSheet.setStyleSheet(qss)
+            self.applyModernWidgetStyle(mode)
+        except Exception as e:
+            QMessageBox.warning(self, self.tr("Theme Error"),
+                                self.tr(f"Could not load theme: {e}"))
 
     def ifOldProjectOpened(self):
         if self.workspace is not None:
