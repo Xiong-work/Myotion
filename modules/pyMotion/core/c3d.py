@@ -177,10 +177,6 @@ class c3dFile:
         self.analog_fs = self.attr["analog_rate"]
         self.point_fs = self.attr["point_rate"]
 
-        # number of analog data of each points, at least 1
-        ratio = int(self.analog_fs / self.point_fs)
-        assert ratio >= 1
-
         analog_labels = self.attr["analog_labels"]
         analog_channel_num = self.attr["analog_used"]
         point_labels = self.attr["point_labels"]
@@ -190,27 +186,34 @@ class c3dFile:
         point_labels = [s.strip() for s in point_labels]
         analog_labels = [s.strip() for s in analog_labels]
 
-        # create storage
-        all_points = points(point_labels, self.point_fs)
+        # Some files (e.g. EMG-only) have no 3D marker data.
+        # Guard against zero point_fs and empty point label list.
+        has_points = point_number > 0 and len(point_labels) > 0 and self.point_fs > 0
+        if has_points:
+            ratio = int(self.analog_fs / self.point_fs)
+            all_points = points(point_labels, self.point_fs)
+        else:
+            ratio = 1
+            all_points = None
+
         self.analogdata = AnalogData(analog_labels, self.analog_fs)
 
+        frame_number = 0
         # load data
         for frame_no, p, analog_data in self.reader.read_frames():
-            for i in range(0, point_number):
-                all_points.insertPoint(point_labels[i], p[i])
-                """
-                    analog data : a matrix of
-                          column -> ratio,               each line has self.ratio number of samples
-                          row    -> analog_channel_num,   each line is for one analog channel
-                          [
-                              [ a, b, c ,  ... ]  
-                              [ ... ]
-                              [ ... ]
-                          ]
-                """
+            if has_points:
+                for i in range(0, point_number):
+                    all_points.insertPoint(point_labels[i], p[i])
             for j in range(0, analog_channel_num):
                 self.analogdata.insertData(analog_labels[j], analog_data[j])
             frame_number = frame_no
+
+        if all_points is not None and self.point_fs > 0:
+            total_time = all_points.size() / self.point_fs
+        elif self.analog_fs > 0 and self.analogdata.size() > 0:
+            total_time = self.analogdata.size() / self.analog_fs
+        else:
+            total_time = 0.0
 
         self.data = {
             "point_fs": self.attr["point_rate"],  # point sample freq
@@ -220,9 +223,8 @@ class c3dFile:
             "point_labels": point_labels,  # label of points
             "channel_labels": analog_labels,  # label of channels
             "frame_number": frame_number,  # frame number in c3d file
-            "time": all_points.size()
-            / self.attr["point_rate"],  # total time of sampling
-            "points": all_points,  # collection of points
+            "time": total_time,  # total time of sampling
+            "points": all_points,  # collection of points (None if no marker data)
             "analog": self.analogdata,  # collection of analogdata
         }
 

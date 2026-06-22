@@ -21,7 +21,7 @@ from pathlib import Path
 import webbrowser
 import argparse
 
-from PySide6.QtCore import Qt, Signal, Slot, QTranslator, QSignalBlocker
+from PySide6.QtCore import Qt, Signal, Slot, QTranslator, QSignalBlocker, QThread
 from PySide6.QtGui import QIcon, QPalette, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,6 +38,9 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QHBoxLayout,
+    QVBoxLayout,
+    QProgressDialog,
+    QInputDialog,
 )
 from PySide6.QtWebEngineCore import QWebEngineUrlScheme
 
@@ -65,6 +68,47 @@ BYPASS_LOGIN_FOR_DEV = True
 
 # Global Constant
 # ///////////////////////////////////////////////////////////////
+
+
+class DebounceTimer:
+    """Single-shot QTimer that restarts on each .trigger() call, firing after delay_ms of silence."""
+    def __init__(self, delay_ms, callback, parent=None):
+        self._timer = QTimer(parent)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(delay_ms)
+        self._timer.timeout.connect(callback)
+
+    def trigger(self):
+        self._timer.start()
+
+
+class BatchEMGWorker(QThread):
+    progress = Signal(int, str)
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, workspace, people, configure, home, parent=None):
+        super().__init__(parent)
+        self._workspace = workspace
+        self._people = people
+        self._configure = configure
+        self._home = home
+
+    def run(self):
+        for i, p in enumerate(self._people):
+            if self.isInterruptionRequested():
+                break
+            try:
+                self._workspace[p].emg.setProcessConfig(self._configure)
+                self._workspace[p].emg.processWithConfigure()
+                self._workspace.genReport(p)
+                self._workspace.saveReport(p, self._home)
+                self.progress.emit(i + 1, p.name)
+            except Exception as e:
+                self.error.emit("{}: {}".format(p.name, str(e)))
+        self.finished.emit()
+
+
 class EMGAddWindow(QMainWindow):
     finished = Signal(tuple)  # Signal emitted when the window closes, returning results.
 
@@ -98,6 +142,16 @@ class EMGAddWindow(QMainWindow):
         self.widgets.import_btn_2.clicked.connect(self.confirmBtnClicked)
         self.widgets.import_btn_3.clicked.connect(self.cancelBtnClicked)
         self.widgets.importMVC_btn.clicked.connect(self.importMVCBtnClicked)
+
+        self._scan_folder_btn = QPushButton(self.tr("Scan Folder..."))
+        self._scan_folder_btn.setCursor(Qt.PointingHandCursor)
+        self._scan_folder_btn.setStyleSheet(
+            "color:#f4f4f4;\n"
+            "background-color: #333b46;\n"
+            "border-radius:8px;"
+        )
+        self.ui.horizontalLayout_2.addWidget(self._scan_folder_btn)
+        self._scan_folder_btn.clicked.connect(self._scanFolderClicked)
 
     def validateEMGDataFile(self, file_path):
         if file_path is None or len(file_path.strip()) == 0:
@@ -519,6 +573,81 @@ class EMGAddWindow(QMainWindow):
         self.finished.emit((self.person, self.emg, self.kinematic))  # Emit close signal and pass results.
         self.close()
 
+    def _scanFolderClicked(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, self.tr("Select participant folder"), self.root or ""
+        )
+        if not folder:
+            return
+
+        candidates = [
+            os.path.join(folder, f)
+            for f in os.listdir(folder)
+            if f.lower().endswith((".c3d", ".mat"))
+        ]
+        if not candidates:
+            QMessageBox.warning(
+                self,
+                self.tr("warning"),
+                self.tr("No .c3d or .mat files found in the selected folder."),
+                QMessageBox.Ok,
+            )
+            return
+
+        if len(candidates) == 1:
+            emg_file = candidates[0]
+            mvc_candidates = []
+        else:
+            emg_file, mvc_candidates = self._resolveFolderFiles(candidates)
+            if emg_file is None:
+                return
+
+        valid, err = self.validateEMGDataFile(emg_file)
+        if not valid:
+            QMessageBox.critical(self, self.tr("error"), err, QMessageBox.Ok)
+            return
+
+        try:
+            self.emg = emg(emg_file)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                self.tr("error"),
+                self.tr("Selected emg file is invalid: {}".format(str(e))),
+                QMessageBox.Ok,
+            )
+            return
+
+        self.channels = self.emg.getAllChannels()
+        self.widgets.label_3.setText(emg_file)
+        self.applyFuzzMatchOnJoint()
+
+        if mvc_candidates:
+            valid_mvc, _ = self.validateBatchEMGDataFiles(mvc_candidates)
+            if valid_mvc:
+                self.mvcfiles = valid_mvc
+                self.applyFuzzMatchOnMVC()
+
+        self.updateChannelBox()
+
+    def _resolveFolderFiles(self, candidates):
+        """Ask user which file is the EMG file; the rest become MVC candidates."""
+        names = [os.path.basename(f) for f in candidates]
+        name, ok = QInputDialog.getItem(
+            self,
+            self.tr("Select EMG File"),
+            self.tr("Multiple files found. Select the main EMG file:"),
+            names,
+            0,
+            False,
+        )
+        if not ok:
+            return None, []
+        idx = names.index(name)
+        emg_file = candidates[idx]
+        mvc_candidates = [f for i, f in enumerate(candidates) if i != idx]
+        return emg_file, mvc_candidates
+
 
 class ConfigWindow(QDialog):
     def __init__(self, width, height, parent=None):
@@ -790,6 +919,29 @@ class MainWindow(QMainWindow):
 
         # Configure validators for EMG filter input boxes.
         self.setupEMGFilterValidators()
+
+        # Instant filter preview — debounce 300 ms so rapid typing doesn't spam re-renders
+        self._filter_debounce = DebounceTimer(300, self._applyFilterPreview, self)
+        widgets.lineEdit_10.textChanged.connect(self._onFilterInputChanged)
+        widgets.lineEdit_11.textChanged.connect(self._onFilterInputChanged)
+        widgets.lineEdit_12.textChanged.connect(self._onFilterInputChanged)
+        widgets.comboBox_7.currentIndexChanged.connect(self._onFilterInputChanged)
+        widgets.comboBox_8.currentIndexChanged.connect(self._onFilterInputChanged)
+
+        # All-steps pipeline panel — replaces the one-at-a-time QToolBox
+        widgets.toolBox.hide()
+        self._pipeline_panel = EMGPipelinePanel(widgets.data_process_instruction)
+        widgets.verticalLayout_42.insertWidget(0, self._pipeline_panel)
+        self._pipeline_panel.configChanged.connect(self._onPipelineStepChanged)
+
+        # Pipeline overview button in the toolbar above the plots
+        self._overview_btn = QPushButton("Pipeline View")
+        self._overview_btn.setCursor(Qt.PointingHandCursor)
+        self._overview_btn.setStyleSheet(
+            "color:#f4f4f4; background-color:#333b46; border-radius:6px; padding:4px 8px;"
+        )
+        self._overview_btn.clicked.connect(self.showPipelineOverview)
+        widgets.horizontalLayout_19.addWidget(self._overview_btn)
 
         # self.test()
 
@@ -1535,6 +1687,58 @@ class MainWindow(QMainWindow):
         self.__updateEMGRenderBuffer(prev=False)
         self.updateEMGSignalProcessPanel(prev=False)
 
+    def _onFilterInputChanged(self):
+        self._filter_debounce.trigger()
+
+    def _applyFilterPreview(self):
+        """Apply filter config from current UI values — silent on incomplete or invalid input."""
+        p, step, chan = self.singleEMG
+        if p is None:
+            return
+        cfg = self.workspace[p].emg.getProcessConfig()
+        if cfg is None:
+            return
+        step_type, _ = cfg.getTypeInfo(step)
+        if step_type != emgConfigEnum.FILTER:
+            return
+        filtertypename = {
+            0: emgFilterEnum.BAND_PASS,
+            1: emgFilterEnum.LOW_PASS,
+        }
+        filter_type = filtertypename[widgets.comboBox_7.currentIndex()]
+        cutoff_b_h_text = widgets.lineEdit_10.text()
+        cutoff_b_l_text = widgets.lineEdit_11.text()
+        cutoff_l_l_text = widgets.lineEdit_12.text()
+        order = widgets.comboBox_8.currentIndex() + 2
+        try:
+            cutoff_b_h = int(cutoff_b_h_text) if cutoff_b_h_text else None
+            cutoff_b_l = int(cutoff_b_l_text) if cutoff_b_l_text else None
+            cutoff_l_l = int(cutoff_l_l_text) if cutoff_l_l_text else None
+        except ValueError:
+            return
+        fs = self.workspace[p].emg.getfs()
+        if filter_type == emgFilterEnum.BAND_PASS:
+            if cutoff_b_h is None or cutoff_b_l is None:
+                return
+            if cutoff_b_h >= fs / 2 or cutoff_b_h < 0 or cutoff_b_l >= fs / 2 or cutoff_b_l < 0:
+                return
+            if cutoff_b_l >= cutoff_b_h:
+                return
+        elif filter_type == emgFilterEnum.LOW_PASS:
+            if cutoff_l_l is None:
+                return
+            if cutoff_l_l >= fs / 2 or cutoff_l_l < 0:
+                return
+        cfg[step].type = filter_type
+        if filter_type == emgFilterEnum.BAND_PASS:
+            cfg[step].cutoff_l = cutoff_b_l
+            cfg[step].cutoff_h = cutoff_b_h
+        elif filter_type == emgFilterEnum.LOW_PASS:
+            cfg[step].cutoff_l = cutoff_l_l
+        cfg[step].order = order
+        self.__updateEMGRenderBuffer(prev=False)
+        self.updateEMGSignalProcessPanel(prev=False)
+
     def EMGChannelSelectorIndexChanged(self, idx):
         p, step, chan = self.singleEMG
         if p is None:
@@ -1883,6 +2087,60 @@ class MainWindow(QMainWindow):
             widgets.plot_output.line(x, self.outputBuffer, chan)
             widgets.plot_output.show()
 
+    def showPipelineOverview(self):
+        p, step, chan = self.singleEMG
+        if p is None:
+            QMessageBox.information(
+                self,
+                self.tr("Pipeline View"),
+                self.tr("Start single EMG processing first."),
+            )
+            return
+        emg_obj = self.workspace[p].emg
+        cfg = emg_obj.getProcessConfig()
+        if cfg is None:
+            return
+
+        x = emg_obj.getLinspace()
+        step_names = cfg.getStepStringList()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self.tr("Pipeline Overview — {}").format(chan))
+        dlg.resize(1000, 700)
+
+        scroll = QScrollArea(dlg)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+
+        content = QWidget()
+        vbox = QVBoxLayout(content)
+        vbox.setContentsMargins(8, 8, 8, 8)
+        vbox.setSpacing(4)
+
+        for i in range(cfg.size()):
+            lbl = QLabel("Step {}: {}".format(i + 1, step_names[i]))
+            lbl.setStyleSheet("color:#c8c8c8; font-weight:bold; font-size:10pt;")
+            vbox.addWidget(lbl)
+            pv = QPlotView(content)
+            pv.setMinimumHeight(200)
+            try:
+                y = emg_obj.tryConfigStepTo(chan, i)
+                pv.line(x, y, chan, title=step_names[i])
+                pv.show()
+            except Exception as e:
+                logger.error("Pipeline overview step {}: {}".format(i, e))
+            vbox.addWidget(pv)
+
+        scroll.setWidget(content)
+
+        outer = QVBoxLayout(dlg)
+        outer.addWidget(scroll)
+        close_btn = QPushButton(self.tr("Close"))
+        close_btn.clicked.connect(dlg.accept)
+        outer.addWidget(close_btn)
+
+        dlg.exec()
+
     def updateEMGConfigureList(self):
         widgets.listWidget.clear()
 
@@ -1930,13 +2188,13 @@ class MainWindow(QMainWindow):
         elif type == emgConfigEnum.NORMALIZATION:
             widgets.checkBox_12.setCheckState(Qt.Checked if cfg[step].enable else Qt.Unchecked)
         elif type == emgConfigEnum.SUMMARY:
-            setp = emgConfigEnum.SUMMARY
             widgets.label_23.setText("{:.4f}".format(cfg[step].max))
             widgets.label_25.setText("{:.4f}".format(cfg[step].min))
             widgets.label_27.setText("{:.4f}".format(cfg[step].med))
             widgets.label_29.setText("{:.4f}".format(cfg[step].rms))
             widgets.label_31.setText("{:.4f}".format(cfg[step].ptp))
             widgets.label_33.setText("{:.4f}".format(cfg[step].zeros))
+            self._pipeline_panel.updateSummary(step, cfg[step])
 
     def updateEMGChannelSelectorContent(self):
         p, step, chan = self.singleEMG
@@ -2294,6 +2552,10 @@ class MainWindow(QMainWindow):
         self.updateEMGConfigureList()
         self.updateEMGChannelSelectorContent()
         self.updateEMGChannelSelectorText(chan)
+        # Load the pipeline panel with the freshly created config
+        cfg = self.workspace[p].emg.getProcessConfig()
+        fs = self.workspace[p].emg.getfs()
+        self._pipeline_panel.load(cfg, fs)
         self.selectSingleEMGStep(0)
 
     def __updateEMGRenderBuffer(self, prev=True, post=True):
@@ -2345,20 +2607,52 @@ class MainWindow(QMainWindow):
         type, str = cfg.getTypeInfo(idx)
         widgets.toolBox.setCurrentIndex(int(type))
         self.updateEMGToolBox(type)
+        # sync pipeline panel
+        self._pipeline_panel.highlightStep(idx)
+        self._pipeline_panel.scrollToCard(idx)
+
+    def _onPipelineStepChanged(self, step_idx):
+        """Called when a pipeline card's config is modified by the user."""
+        p, step, chan = self.singleEMG
+        if p is None:
+            return
+        if step != step_idx:
+            # Switch preview to the card that was just changed
+            self.selectSingleEMGStep(step_idx)
+        else:
+            self.__updateEMGRenderBuffer(prev=False)
+            self.updateEMGSignalProcessPanel(prev=False)
 
     def startBatchEMGProcess(self, people, configure):
-        for p in people:
-            logger.info("Batch Process: processing data for {}".format(p.name))
-            # process data
-            self.workspace[p].emg.setProcessConfig(configure)
-            self.workspace[p].emg.processWithConfigure()
-            # save report
-            self.workspace.genReport(p)
-            self.workspace.saveReport(p, self.home)
+        n = len(people)
+        self._batch_progress = QProgressDialog(
+            self.tr("Processing participants..."), self.tr("Cancel"), 0, n, self
+        )
+        self._batch_progress.setWindowModality(Qt.WindowModal)
+        self._batch_progress.setMinimumDuration(0)
+        self._batch_progress.setValue(0)
 
-        # clear selectedparitipant
+        self._batch_worker = BatchEMGWorker(
+            self.workspace, people, configure, self.home, self
+        )
+        self._batch_worker.progress.connect(self._onBatchProgress)
+        self._batch_worker.finished.connect(self._onBatchFinished)
+        self._batch_worker.error.connect(self._onBatchError)
+        self._batch_progress.canceled.connect(self._batch_worker.requestInterruption)
+        self._batch_worker.start()
+
+    def _onBatchProgress(self, count, name):
+        self._batch_progress.setValue(count)
+        self._batch_progress.setLabelText(self.tr("Processing: {}").format(name))
+
+    def _onBatchFinished(self):
+        self._batch_progress.setValue(self._batch_progress.maximum())
+        self._batch_progress.close()
         self.selectedParticipants.clear()
         self.updateEMGParticipantBox()
+
+    def _onBatchError(self, msg):
+        logger.error("Batch process error: {}".format(msg))
 
 
     def closeEvent(self, event):  # Window close event handler.
