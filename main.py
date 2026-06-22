@@ -50,6 +50,8 @@ from qplotview import QPlotView
 # ///////////////////////////////////////////////////////////////
 from modules import *
 from widgets import *
+# _is_non_emg_channel is private and not re-exported by star imports; import explicitly
+from modules.pyMotion.core.emg import _is_non_emg_channel
 
 os.environ["QT_FONT_DPI"] = "96"  # FIX Problem for High DPI and Scale above 100%
 # SET AS GLOBAL WIDGETS
@@ -166,6 +168,20 @@ class EMGAddWindow(QMainWindow):
 
         if labels is None or len(labels) == 0:
             return False, self.tr("No channels found in file: {}".format(os.path.basename(file_path)))
+
+        # For C3D files, also verify that at least one channel survives EMG filtering.
+        # Files with only force plate / IMU data (no EMG) pass the label count check
+        # but fail later in emg.setEMGFile() — catch this early with a clear message.
+        if ext == ".c3d":
+            emg_labels = [l for l in labels if not _is_non_emg_channel(l)]
+            if not emg_labels:
+                return False, self.tr(
+                    "No EMG channels found in '{}'. "
+                    "All {} analog channel(s) appear to be force plate or sensor data. "
+                    "The file can still be used for kinematics viewing.".format(
+                        os.path.basename(file_path), len(labels)
+                    )
+                )
 
         return True, ""
 
@@ -768,6 +784,7 @@ class MainWindow(QMainWindow):
         # ///////////////////////////////////////////////////////////////
         UIFunctions.uiDefinitions(self)
         self.applyModernWidgetStyle()
+        self._setup_kinematics_splitters()
 
         # QTableWidget PARAMETERS
         # ///////////////////////////////////////////////////////////////
@@ -2476,10 +2493,56 @@ class MainWindow(QMainWindow):
                 treeItem2 = QTreeWidgetItem(treeItem)
                 treeItem2.setText(0, c)
                 treeItem.addChild(treeItem2)
+            # Force plate channels — nested under the participant, grouped by plate
+            if k.force_plates:
+                fp_group = QTreeWidgetItem(treeItem)
+                fp_group.setText(0, "Force Plates ({})".format(len(k.force_plates)))
+                for fp in k.force_plates:
+                    plate_node = QTreeWidgetItem(fp_group)
+                    plate_node.setText(0, "Plate {}".format(fp.plate_id))
+                    for comp in ("Fx", "Fy", "Fz"):
+                        comp_node = QTreeWidgetItem(plate_node)
+                        comp_node.setText(0, "Plate{} {}".format(fp.plate_id, comp))
+                fp_group.setExpanded(False)
+                treeItem.addChild(fp_group)
 
         tree.itemDoubleClicked.connect(self.loadKinemtic)
         tree.setHeaderItem(QTreeWidgetItem(["Participant"]))
         tree.addTopLevelItem(treeItem)
+
+    def _setup_kinematics_splitters(self):
+        """Replace the fixed HBox/VBox layouts in the kinematics page with QSplitters.
+
+        horizontalLayout_37 originally holds kinematics_render and kinematics_graphs
+        in a plain QHBoxLayout with no drag handle.  verticalLayout_44 holds the top
+        area and the playbar frame with no drag handle either.  Both are replaced here
+        so the user can resize the panes at runtime.
+        """
+        # 1. Horizontal splitter: 3D render | trajectory plot
+        h_split = QSplitter(Qt.Orientation.Horizontal)
+        h_split.setHandleWidth(4)
+        h_split.setChildrenCollapsible(False)
+        widgets.horizontalLayout_37.removeWidget(widgets.kinematics_render)
+        widgets.horizontalLayout_37.removeWidget(widgets.kinematics_graphs)
+        h_split.addWidget(widgets.kinematics_render)
+        h_split.addWidget(widgets.kinematics_graphs)
+        h_split.setStretchFactor(0, 1)
+        h_split.setStretchFactor(1, 1)
+        widgets.horizontalLayout_37.addWidget(h_split)
+        # Relax the hard minimum so the handle can actually be dragged left
+        widgets.renderWidget.setMinimumWidth(150)
+
+        # 2. Vertical splitter: top area (render + plot) | playbar
+        v_split = QSplitter(Qt.Orientation.Vertical)
+        v_split.setHandleWidth(4)
+        v_split.setChildrenCollapsible(False)
+        widgets.verticalLayout_44.removeWidget(widgets.kinematics_left_top)
+        widgets.verticalLayout_44.removeWidget(widgets.kinematics_left_bottom)
+        v_split.addWidget(widgets.kinematics_left_top)
+        v_split.addWidget(widgets.kinematics_left_bottom)
+        v_split.setStretchFactor(0, 4)  # render+plot area takes most vertical space
+        v_split.setStretchFactor(1, 0)  # playbar stays compact
+        widgets.verticalLayout_44.addWidget(v_split)
 
     def preloadKinematicPage(self):
         ps = self.workspace.getParticipants()
@@ -2514,6 +2577,7 @@ class MainWindow(QMainWindow):
             widgets.kinematic_analysis,
             None,
             widgets.kinematics_label_tree,
+            participant_item=item,
         )
 
     def preloadFreqAnalysisPage(self):
