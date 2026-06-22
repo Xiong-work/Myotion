@@ -15,3 +15,4 @@
 # ///////////////////////////////////////////////////////////////
 
 from . custom_grips import CustomGrip
+from .emg_pipeline_panel import EMGPipelinePanel, EMGStepCard

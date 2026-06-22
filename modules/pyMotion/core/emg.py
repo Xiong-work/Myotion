@@ -10,6 +10,29 @@ import re
 from enum import IntEnum
 from copy import deepcopy
 
+# Compiled patterns for analog channels that are never EMG:
+# force-plate forces/torques and IMU accelerometer/gyro/mag data.
+# Applied automatically when loading C3D files so these channels are not
+# presented to the user as selectable EMG signals.
+_NON_EMG_PATTERNS = [
+    # Force plate with explicit prefix + optional plate-number suffix:
+    #   "Force.Fx", "Force.Fx1", "Torque.Mz", "Moment.Mx2", etc.
+    # "Moment" is an alternative spelling used by some systems (e.g. Vicon).
+    re.compile(r"^(Force|Torque|Moment)\.[FM][xyz]\d*$", re.IGNORECASE),
+    # Bare force/moment component: "Fx", "Fy1", "Fz2", "Mx", "My1", "Mz2", etc.
+    # Exactly F or M + x/y/z + optional digits. Common muscle abbreviations are
+    # safe: RF, FDL, MG, MF, BF all differ because their 2nd char is not x/y/z.
+    re.compile(r"^[FM][xyz]\d*$", re.IGNORECASE),
+    # IMU sensor channels: "Sensor 1.ACCX1", "Sensor 3.GYROZ3", "Sensor 2.MAGY2", etc.
+    # Requires "Sensor N." prefix -- "Sensor N.EMG" and "Sensor_EMG1" are kept.
+    re.compile(r"^Sensor\s*\d+\.(ACC|GYRO|MAG)[XYZ]\d*$", re.IGNORECASE),
+]
+
+
+def _is_non_emg_channel(label: str) -> bool:
+    """Return True if label matches a known non-EMG analog channel pattern."""
+    return any(p.match(label) for p in _NON_EMG_PATTERNS)
+
 
 class emgConfigEnum(IntEnum):
     DC_OFFSET = 0
@@ -547,10 +570,43 @@ class emg:
         try:
             if self.isC3D(f):
                 c3d_obj = c3dFile(f)
-                self.Channels = c3d_obj.analog.labels
+                all_labels = c3d_obj.analog.labels
 
-                # load TST
-                self.emgTST = c3d_obj.analog.convertToTST()
+                # Auto-exclude known non-EMG channels (force plates, IMU sensors)
+                emg_labels = [l for l in all_labels if not _is_non_emg_channel(l)]
+                excluded = [l for l in all_labels if l not in set(emg_labels)]
+
+                if excluded and emg_labels:
+                    logger.info(
+                        "C3D load '{}': kept {} EMG channel(s) {}, "
+                        "excluded {} non-EMG channel(s) {}".format(
+                            os.path.basename(f),
+                            len(emg_labels), emg_labels,
+                            len(excluded), excluded,
+                        )
+                    )
+                elif excluded and not emg_labels:
+                    # All channels were non-EMG — raise a clear error
+                    raise ValueError(
+                        "No EMG channels found in '{}'. "
+                        "All {} analog channel(s) were identified as non-EMG "
+                        "(force plate / IMU data): {}".format(
+                            os.path.basename(f), len(excluded), excluded
+                        )
+                    )
+                else:
+                    logger.info(
+                        "C3D load '{}': loaded {} channel(s) {}".format(
+                            os.path.basename(f), len(emg_labels), emg_labels
+                        )
+                    )
+
+                self.Channels = emg_labels
+                if emg_labels:
+                    emg_data = [c3d_obj.analog[l] for l in emg_labels]
+                    self.emgTST = timeSeriesTable(c3d_obj.analog.fs, emg_labels, emg_data)
+                else:
+                    self.emgTST = None
 
             elif self.isMAT(f):
                 mat_obj = matFile(f)

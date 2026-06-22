@@ -61,25 +61,30 @@ class matFile:
         except Exception as e:
             logger.error(f"Failed to open MAT file: {file}. Error: {str(e)}")
             raise ValueError(f"Failed to open MAT file: {file}. {str(e)}")
-        self.keylist = sorted(self.reader.keys())
-        if len(self.keylist) <= 3:
-            logger.error("MAT file keylist less than 4")
-            raise ValueError("Invalid MAT file format: no movement data table found")
 
-        # ['__globals__', '__header__', '__version__', 'TABLE']
-        self.raw = self.reader[self.keylist[3]]
+        # Find the first non-dunder data key dynamically (e.g. 'TABLE', 'DATA', etc.)
+        data_keys = [k for k in sorted(self.reader.keys()) if not k.startswith("__")]
+        if not data_keys:
+            raise ValueError(
+                "Invalid MAT file format: no data tables found. "
+                "Available keys: {}".format(list(self.reader.keys()))
+            )
+        self.raw = self.reader[data_keys[0]]
 
-        # ['info', 'movements']
-        info = self.raw["info"].tolist()
+        # Parse optional info metadata — degrade gracefully if fields are missing or renamed
+        try:
+            info = self.raw["info"].tolist()
+        except Exception:
+            info = None
 
         self.metadata = {
-            "create_version": info["created_with_version"].tolist(),
-            "export_version": info["exported_with_version"].tolist(),
-            "last_name": info["last_name"].tolist(),
-            "first_name": info["first name"].tolist(),
-            "gender": info["sex"].tolist(),
-            "date": info["measurement_date"].tolist(),
-            "record_name": info["record_name"].tolist(),
+            "create_version": self._safe_field(info, "created_with_version"),
+            "export_version": self._safe_field(info, "exported_with_version"),
+            "last_name": self._safe_field(info, "last_name"),
+            "first_name": self._safe_field(info, "first name", "first_name", "firstname"),
+            "gender": self._safe_field(info, "sex", "gender"),
+            "date": self._safe_field(info, "measurement_date", "date"),
+            "record_name": self._safe_field(info, "record_name", "name"),
             "channel_number": 0,
             "labels": [],
         }
@@ -88,26 +93,35 @@ class matFile:
         movements = self.raw["movements"].tolist()
         if "sources" not in movements.dtype.names:
             logger.error("sources is not found in movements")
-            raise ValueError("Invalid MAT file format: sources field not found")
+            raise ValueError(
+                "Invalid MAT file format: 'sources' field not found in movements. "
+                "Available fields: {}".format(list(movements.dtype.names))
+            )
         # [ 'sources', 'signals' ]
         sources = movements["sources"].tolist()
 
         if "signals" not in sources.dtype.names:
             logger.error("signals is not found in sources")
-            raise ValueError("Invalid MAT file format: signals field not found")
+            raise ValueError(
+                "Invalid MAT file format: 'signals' field not found in sources. "
+                "Available fields: {}".format(list(sources.dtype.names))
+            )
         signals = sources["signals"].tolist()
 
-        # matdata type
+        # matdata type — skip individual channels that have incomplete fields
         movement_datas = []
         for key in signals.dtype.fields:
             signal_x = signals[key].tolist()
             movement_data = {}
-            for sub_key in signal_x.dtype.fields:
-                movement_data[sub_key] = np.squeeze(signal_x[sub_key]).tolist()
-            movement_datas.append(matdata(movement_data))
+            try:
+                for sub_key in signal_x.dtype.fields:
+                    movement_data[sub_key] = np.squeeze(signal_x[sub_key]).tolist()
+                movement_datas.append(matdata(movement_data))
+            except Exception as e:
+                logger.warning("Skipping signal '{}': {}".format(key, e))
         if len(movement_datas) == 0:
             logger.error("movement data not extracted from mat")
-            raise ValueError("Invalid MAT file format: movement channels are empty")
+            raise ValueError("Invalid MAT file format: no valid channels could be extracted")
 
         self.movements = {
             "type": movements["type"].tolist(),
@@ -122,6 +136,19 @@ class matFile:
         self.metadata["channel_number"] = len(self.movements["channels"])
 
         logger.info("extracted mat labels {}".format(self.metadata["labels"]))
+
+    @staticmethod
+    def _safe_field(struct, *keys, default=""):
+        """Try multiple field names on a tolist()-ed MATLAB struct; return first found or default."""
+        if struct is None:
+            return default
+        for k in keys:
+            try:
+                val = struct[k]
+                return val.tolist() if hasattr(val, "tolist") else val
+            except Exception:
+                continue
+        return default
 
     def __getattr__(self, key):
         if key == "metadata":
