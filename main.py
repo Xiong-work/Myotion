@@ -859,13 +859,13 @@ class MainWindow(QMainWindow):
         widgets.comboBox_20.currentIndexChanged.connect(self.FFTPlotPageIndexSelected)
 
         # start page
-        widgets.settingsTopBtn.hide()
-        if not BYPASS_LOGIN_FOR_DEV:
-            widgets.signInButton.clicked.connect(self.login_click)
-        widgets.signUpButton.clicked.connect(
-            lambda x: webbrowser.open("http://www.accmov.com")
-        )
-        widgets.btn_logout.clicked.connect(self.logout_click)
+        # widgets.settingsTopBtn.hide()
+        # if not BYPASS_LOGIN_FOR_DEV:
+        #     widgets.signInButton.clicked.connect(self.login_click)
+        # widgets.signUpButton.clicked.connect(
+        #     lambda x: webbrowser.open("http://www.accmov.com")
+        # )
+        # widgets.btn_logout.clicked.connect(self.logout_click)
 
         # SHOW APP
         # ///////////////////////////////////////////////////////////////
