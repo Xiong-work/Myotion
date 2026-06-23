@@ -9,6 +9,8 @@ from .logger import *
 import re
 from enum import IntEnum
 from copy import deepcopy
+import numpy as np
+import scipy.signal as _sig
 
 # Compiled patterns for analog channels that are never EMG:
 # force-plate forces/torques and IMU accelerometer/gyro/mag data.
@@ -115,15 +117,22 @@ class emgRectification:
         return obj
 
 
+class emgNormTypeEnum(IntEnum):
+    MVC = 0        # normalize by MVC trial max (existing behaviour)
+    TRIAL_MAX = 1  # normalize by max of valid cropped envelope segment
+
+
 class emgNormalization:
     id = emgConfigEnum.NORMALIZATION
 
     def __init__(self):
         self.enable = True
+        self.norm_type = emgNormTypeEnum.MVC  # default: MVC (backward compatible)
 
     def toXML(self):
         e = xmlElement("emgNormalization")
         e.addNode("enable", xmlString(self.enable))
+        e.addNode("norm_type", xmlString(int(self.norm_type)))
         return e
 
     @staticmethod
@@ -138,6 +147,14 @@ class emgNormalization:
             obj.enable = xmlStringParse(e.text, bool)
         else:
             obj.enable = False
+        e = root.find("norm_type")
+        if e and e.text:
+            try:
+                obj.norm_type = emgNormTypeEnum(xmlStringParse(e.text, int))
+            except Exception:
+                obj.norm_type = emgNormTypeEnum.MVC
+        else:
+            obj.norm_type = emgNormTypeEnum.MVC
         return obj
 
 
@@ -296,11 +313,20 @@ class emgConfigure:
         self.stepConfig = []
         for i, s in enumerate(emgConfigInfo.classical_steps):
             config = self.initConfig(s)
-            
-            # Special handling for the second FILTER (index 3; keep in sync with classical_steps).
-            if s == emgConfigEnum.FILTER and i == 3:  # second filter
+
+            # Step 2 (index 1): band-pass for EMG signal conditioning
+            if s == emgConfigEnum.FILTER and i == 1:
+                config.type = emgFilterEnum.BAND_PASS
+                config.cutoff_l = 50
+                config.cutoff_h = 450
+                config.order = 2
+
+            # Step 4 (index 3): low-pass linear envelope
+            if s == emgConfigEnum.FILTER and i == 3:
                 config.type = emgFilterEnum.LOW_PASS
-                
+                config.cutoff_l = 6
+                config.order = 2
+
             self.stepConfig.append(config)
 
 
@@ -414,6 +440,7 @@ class emg:
     def __init__(self, file=""):
         self.emgFile = file  # file path
         self.emgTST = None  # emg data
+        self.rawTST = None  # original loaded signal, never modified after setEMGFile
         self.emgMVCTST = None  # emg MVC data
         self.processCFG = None  # emg data process configure
         self.Channels = []  # channels of emg
@@ -463,6 +490,7 @@ class emg:
     # loading emg from a report
     def load_from_report(self, tst):
         self.emgTST = tst.copy()
+        self.rawTST = self.emgTST.copy()
         self.isprocessdone = True
         self.Channels = tst.labels.copy()
         self.enabledChannels = tst.labels.copy()
@@ -536,6 +564,8 @@ class emg:
         if old in self.Channels:
             self.emgTST.renameChannel(old, new)
             self.emgMVCTST.renameChannel(old, new)
+            if self.rawTST is not None:
+                self.rawTST.renameChannel(old, new)
             # rename channel name
             self.Channels[self.Channels.index(old)] = new
             self.chanMap[old] = new
@@ -623,6 +653,9 @@ class emg:
             raise ValueError("No channels extracted from EMG file: {}".format(f))
         if self.emgTST is None:
             raise ValueError("Failed to convert EMG file to TimeSeriesTable: {}".format(f))
+
+        # preserve original loaded signal for non-destructive analysis helpers
+        self.rawTST = self.emgTST.copy()
 
         # update MVC TST
         self.emgMVCTST = timeSeriesTable(self.emgTST.fs, self.emgTST.labels)
@@ -724,7 +757,7 @@ class emg:
     def setProcessConfig(self, cfg):
         self.processCFG = cfg
 
-    def __tryConfigStepImpl(self, tst, chan, step):
+    def __tryConfigStepImpl(self, tst, chan, step, crop_interval=None):
         if chan not in self.Channels:
             logger.error("Targetted channel not exist")
             raise Exception(logger.errstr)
@@ -760,17 +793,31 @@ class emg:
                 )
             elif type == emgConfigEnum.NORMALIZATION:
                 if cfg.enable:
-                    # get max from MVCTST
-                    max_v = self.emgMVCTST.max(chan)
+                    norm_type = getattr(cfg, 'norm_type', emgNormTypeEnum.MVC)
+                    if norm_type == emgNormTypeEnum.TRIAL_MAX:
+                        seg = self.getCroppedEnvelopeSegment(chan, crop_interval)
+                        max_v = float(np.max(seg)) if len(seg) > 0 else 1.0
+                        if max_v <= 0:
+                            max_v = 1.0
+                    else:
+                        max_v = self.emgMVCTST.max(chan)
                     output = tst.normalization(chan, max_v)
             elif type == emgConfigEnum.SUMMARY:
-                # output remain the same
-                cfg.max = tst.max(chan)
-                cfg.min = tst.min(chan)
-                cfg.med = tst.median(chan)
-                cfg.rms = tst.rms(chan)
-                cfg.ptp = tst.ptp(chan)
-                cfg.zeros = tst.countZeros(chan)
+                # Compute stats on the valid analysis segment (cropped if set).
+                # Output signal is unchanged — summary never modifies the waveform.
+                arr = np.asarray(tst[chan], dtype=float)
+                if crop_interval is not None:
+                    arr = self._crop_array(arr, tst.fs, crop_interval)
+                if len(arr) > 0:
+                    cfg.max = float(arr.max())
+                    cfg.min = float(arr.min())
+                    cfg.med = float(np.median(arr))
+                    cfg.rms = float(np.sqrt(np.mean(arr ** 2)))
+                    cfg.ptp = float(arr.max() - arr.min())
+                    cfg.zeros = int(len(arr) - np.count_nonzero(arr))
+                else:
+                    cfg.max = cfg.min = cfg.med = cfg.rms = cfg.ptp = 0.0
+                    cfg.zeros = 0
         except Exception as e:
             output = [0] * tst.size()
             import traceback
@@ -782,23 +829,122 @@ class emg:
             )
         return output
 
-    def tryConfigStep(self, chan, step):
-        return self.__tryConfigStepImpl(self.emgTST, chan, step)
+    def tryConfigStep(self, chan, step, crop_interval=None):
+        src = self.rawTST if self.rawTST is not None else self.emgTST
+        return self.__tryConfigStepImpl(src, chan, step, crop_interval)
 
-    def tryConfigStepTo(self, chan, step):
-        tst = self.emgTST.copy()
+    def tryConfigStepTo(self, chan, step, crop_interval=None):
+        src = self.rawTST if self.rawTST is not None else self.emgTST
+        tst = src.copy()
         for i in range(0, step + 1):
-            tst[chan] = self.__tryConfigStepImpl(tst, chan, i)
+            tst[chan] = self.__tryConfigStepImpl(tst, chan, i, crop_interval)
         return tst[chan]
 
     # process EMG and MVC using configure file
-    def processWithConfigure(self):
+    def processWithConfigure(self, crop_interval=None):
         for chan in self.Channels:
             if chan not in self.enabledChannels:
                 continue
 
             for step in range(0, self.processCFG.size()):
-                self.emgTST[chan] = self.__tryConfigStepImpl(self.emgTST, chan, step)
-                self.emgMVCTST[chan] = self.__tryConfigStepImpl(
-                    self.emgMVCTST, chan, step
+                self.emgTST[chan] = self.__tryConfigStepImpl(
+                    self.emgTST, chan, step, crop_interval
                 )
+                self.emgMVCTST[chan] = self.__tryConfigStepImpl(
+                    self.emgMVCTST, chan, step, crop_interval
+                )
+
+    # ------------------------------------------------------------------
+    # Non-destructive analysis helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _crop_array(arr, fs, crop_interval):
+        """Slice arr to [t_start_s, t_end_s]; returns arr unchanged if crop is None."""
+        if crop_interval is None or len(arr) == 0:
+            return arr
+        t_start, t_end = crop_interval
+        n = len(arr)
+        i_start = max(0, min(n, int(t_start * fs)))
+        i_end = max(0, min(n, int(t_end * fs)))
+        if i_end <= i_start:
+            return arr
+        return arr[i_start:i_end]
+
+    def getFreqSafeSegment(self, channel, crop_interval=None):
+        """Return a cropped EMG segment valid for frequency analysis.
+
+        Applies only DC removal and band-pass filtering from processCFG
+        (by step type, not by index), then crops to crop_interval.
+        Rectification, LP-envelope, normalization, and summary steps are
+        intentionally skipped — they corrupt spectral content.
+
+        Falls back to raw cropped signal if processCFG is not yet set.
+        Returns a numpy ndarray.
+        """
+        if self.rawTST is None or channel not in self.rawTST.labels:
+            return np.array([])
+        fs = self.rawTST.fs
+        arr = np.array(self.rawTST[channel], dtype=float)
+        if self.processCFG is not None:
+            for step_idx in range(self.processCFG.size()):
+                stype, _ = self.processCFG.getTypeInfo(step_idx)
+                cfg = self.processCFG[step_idx]
+                try:
+                    if stype == emgConfigEnum.DC_OFFSET and cfg.enable:
+                        arr = arr - arr.mean()
+                    elif (stype == emgConfigEnum.FILTER
+                          and cfg.enable
+                          and cfg.type == emgFilterEnum.BAND_PASS
+                          and 0 < cfg.cutoff_l < fs / 2
+                          and 0 < cfg.cutoff_h < fs / 2
+                          and cfg.cutoff_l < cfg.cutoff_h):
+                        sos = _sig.butter(cfg.order, [cfg.cutoff_l, cfg.cutoff_h],
+                                          btype='bp', fs=fs, output='sos')
+                        arr = _sig.sosfilt(sos, arr)
+                    # FULL_W_RECT, LP filter, NORMALIZATION, SUMMARY → skipped
+                except Exception as e:
+                    logger.warning("getFreqSafeSegment step {}: {}".format(step_idx, e))
+        return self._crop_array(arr, fs, crop_interval)
+
+    def getCroppedEnvelopeSegment(self, channel, crop_interval=None):
+        """Return a cropped envelope-processed EMG segment for time-domain analysis.
+
+        Applies DC removal, band-pass, full-wave rectification, and LP envelope
+        filter from processCFG (by step type), then crops to crop_interval.
+        Normalization and summary steps are skipped — normalization (MVC or
+        trial-max) is the caller's responsibility and applies to time-domain
+        amplitude workflows only.
+
+        Returns a numpy ndarray.
+        """
+        if self.rawTST is None or channel not in self.rawTST.labels:
+            return np.array([])
+        fs = self.rawTST.fs
+        arr = np.array(self.rawTST[channel], dtype=float)
+        if self.processCFG is not None:
+            for step_idx in range(self.processCFG.size()):
+                stype, _ = self.processCFG.getTypeInfo(step_idx)
+                cfg = self.processCFG[step_idx]
+                try:
+                    if stype == emgConfigEnum.DC_OFFSET and cfg.enable:
+                        arr = arr - arr.mean()
+                    elif stype == emgConfigEnum.FILTER and cfg.enable:
+                        if (cfg.type == emgFilterEnum.BAND_PASS
+                                and 0 < cfg.cutoff_l < fs / 2
+                                and 0 < cfg.cutoff_h < fs / 2
+                                and cfg.cutoff_l < cfg.cutoff_h):
+                            sos = _sig.butter(cfg.order, [cfg.cutoff_l, cfg.cutoff_h],
+                                              btype='bp', fs=fs, output='sos')
+                            arr = _sig.sosfilt(sos, arr)
+                        elif (cfg.type == emgFilterEnum.LOW_PASS
+                              and 0 < cfg.cutoff_l < fs / 2):
+                            sos = _sig.butter(cfg.order, cfg.cutoff_l,
+                                              btype='lp', fs=fs, output='sos')
+                            arr = _sig.sosfilt(sos, arr)
+                    elif stype == emgConfigEnum.FULL_W_RECT and cfg.enable:
+                        arr = np.abs(arr)
+                    # NORMALIZATION, SUMMARY → skipped; normalization is caller's responsibility
+                except Exception as e:
+                    logger.warning("getCroppedEnvelopeSegment step {}: {}".format(step_idx, e))
+        return self._crop_array(arr, fs, crop_interval)

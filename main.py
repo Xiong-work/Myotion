@@ -93,7 +93,9 @@ class BatchEMGWorker(QThread):
                 break
             try:
                 self._workspace[p].emg.setProcessConfig(self._configure)
-                self._workspace[p].emg.processWithConfigure()
+                self._workspace[p].emg.processWithConfigure(
+                    crop_interval=self._workspace[p].crop_interval
+                )
                 self._workspace.genReport(p)
                 self._workspace.saveReport(p, self._home)
                 self.progress.emit(i + 1, p.name)
@@ -666,6 +668,9 @@ class ConfigWindow(QDialog):
         self.setWindowTitle("Configuration")
 
         self.widgets = self.ui
+        self.person = None
+        self.emg = None
+        self.kinematic = None
 
     def run(self):
         self.exec()
@@ -785,6 +790,7 @@ class MainWindow(QMainWindow):
         UIFunctions.uiDefinitions(self)
         self.applyModernWidgetStyle()
         self._setup_kinematics_splitters()
+        self._setup_emg_splitters()
 
         # QTableWidget PARAMETERS
         # ///////////////////////////////////////////////////////////////
@@ -950,6 +956,60 @@ class MainWindow(QMainWindow):
         self._pipeline_panel = EMGPipelinePanel(widgets.data_process_instruction)
         widgets.verticalLayout_42.insertWidget(0, self._pipeline_panel)
         self._pipeline_panel.configChanged.connect(self._onPipelineStepChanged)
+
+        # Manual crop group — compact widget at the top of the instruction panel
+        _LBL_S = "color: #c8c8c8; font-size: 9pt;"
+        _SPIN_S = "background-color: #333b46; color: #f4f4f4; border-radius:4px; padding:2px;"
+        _BTN_S  = "color:#f4f4f4; background-color:#333b46; border-radius:4px; padding:3px 6px;"
+        _GRP_S  = (
+            "QGroupBox {"
+            "  font-weight: bold; color: #c8c8c8;"
+            "  border: 1px solid #444; border-radius: 6px;"
+            "  margin-top: 8px; padding: 4px;"
+            "}"
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+        )
+        self._crop_group = QGroupBox("Analysis Segment")
+        self._crop_group.setStyleSheet(_GRP_S)
+        _cg_layout = QVBoxLayout(self._crop_group)
+        _cg_layout.setContentsMargins(8, 16, 8, 4)
+        _cg_layout.setSpacing(3)
+        _crop_row = QHBoxLayout()
+        _crop_row.setSpacing(4)
+        _lbl_start = QLabel("Start (s):")
+        _lbl_start.setStyleSheet(_LBL_S)
+        _crop_row.addWidget(_lbl_start)
+        self._crop_start_spin = QDoubleSpinBox()
+        self._crop_start_spin.setRange(0.0, 9999.0)
+        self._crop_start_spin.setDecimals(3)
+        self._crop_start_spin.setSingleStep(0.1)
+        self._crop_start_spin.setStyleSheet(_SPIN_S)
+        _crop_row.addWidget(self._crop_start_spin)
+        _lbl_end = QLabel("End (s):")
+        _lbl_end.setStyleSheet(_LBL_S)
+        _crop_row.addWidget(_lbl_end)
+        self._crop_end_spin = QDoubleSpinBox()
+        self._crop_end_spin.setRange(0.0, 9999.0)
+        self._crop_end_spin.setDecimals(3)
+        self._crop_end_spin.setSingleStep(0.1)
+        self._crop_end_spin.setStyleSheet(_SPIN_S)
+        _crop_row.addWidget(self._crop_end_spin)
+        _crop_apply = QPushButton("Apply")
+        _crop_apply.setMaximumWidth(55)
+        _crop_apply.setStyleSheet(_BTN_S)
+        _crop_apply.clicked.connect(self._onCropApply)
+        _crop_row.addWidget(_crop_apply)
+        _crop_clear = QPushButton("Clear")
+        _crop_clear.setMaximumWidth(55)
+        _crop_clear.setStyleSheet(_BTN_S)
+        _crop_clear.clicked.connect(self._onCropClear)
+        _crop_row.addWidget(_crop_clear)
+        _cg_layout.addLayout(_crop_row)
+        self._crop_status_label = QLabel("Full trial (no crop)")
+        self._crop_status_label.setStyleSheet("color: #666; font-size: 10px;")
+        _cg_layout.addWidget(self._crop_status_label)
+        self._crop_group.setEnabled(False)
+        widgets.verticalLayout_42.insertWidget(0, self._crop_group)
 
         # Pipeline overview button in the toolbar above the plots
         self._overview_btn = QPushButton("Pipeline View")
@@ -1826,7 +1886,9 @@ class MainWindow(QMainWindow):
 
         # apply configuration on all chans in EMG and MVC
         # this might takes a while
-        self.workspace[p].emg.processWithConfigure()
+        self.workspace[p].emg.processWithConfigure(
+            crop_interval=self.workspace[p].crop_interval
+        )
 
         # save report
         self.workspace.genReport(p)
@@ -2026,11 +2088,22 @@ class MainWindow(QMainWindow):
         # w.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         return container
 
+    def _get_freq_safe_tst(self, p, channel):
+        """Single-channel TST of the cropped frequency-safe EMG segment.
+
+        Uses DC removal + band-pass only (no rectification, no LP envelope,
+        no normalization), then crops to profile.crop_interval.
+        """
+        crop = self.workspace[p].crop_interval
+        arr = self.workspace[p].emg.getFreqSafeSegment(channel, crop)
+        fs = self.workspace[p].emg.getfs()
+        return timeSeriesTable(fs, [channel], [arr])
+
     # draw FFT
     def FreqAnalysisCreateQPlotView(self, p, channel, l, r, title):
         pv = QPlotView()
-        # calcuate FFT
-        tst = self.workspace[p].emg.getTST()
+        # Use frequency-safe signal: DC + band-pass only, no envelope, no normalization
+        tst = self._get_freq_safe_tst(p, channel)
         freq, v = tst.fft_db(channel, l, r)
 
         # mean frequency with filtered value
@@ -2141,10 +2214,11 @@ class MainWindow(QMainWindow):
 
         x = emg_obj.getLinspace()
         step_names = cfg.getStepStringList()
+        crop = self.workspace[p].crop_interval
 
         dlg = QDialog(self)
         dlg.setWindowTitle(self.tr("Pipeline Overview — {}").format(chan))
-        dlg.resize(1000, 700)
+        dlg.resize(1200, 900)
 
         scroll = QScrollArea(dlg)
         scroll.setWidgetResizable(True)
@@ -2160,9 +2234,9 @@ class MainWindow(QMainWindow):
             lbl.setStyleSheet("color:#c8c8c8; font-weight:bold; font-size:10pt;")
             vbox.addWidget(lbl)
             pv = QPlotView(content)
-            pv.setMinimumHeight(200)
+            pv.setMinimumHeight(320)
             try:
-                y = emg_obj.tryConfigStepTo(chan, i)
+                y = emg_obj.tryConfigStepTo(chan, i, crop)
                 pv.line(x, y, chan, title=step_names[i])
                 pv.show()
             except Exception as e:
@@ -2369,7 +2443,6 @@ class MainWindow(QMainWindow):
         p_name = item.parent().text(column)
         channel = item.text(column)
         p = self.workspace.findParticipant(p_name)
-        x = self.workspace[p].emg.getLinspace()
 
         # set state machine
         logger.info(
@@ -2378,7 +2451,12 @@ class MainWindow(QMainWindow):
         self.freqAnalysis = (p, channel)
         self.freqAnalysisPlots.clear()
 
-        widgets.freq_timedomain.line(x, self.workspace[p].emg[channel], channel)
+        # Show frequency-safe signal (DC + band-pass only, no envelope, no normalization)
+        crop = self.workspace[p].crop_interval
+        arr = self.workspace[p].emg.getFreqSafeSegment(channel, crop)
+        fs = self.workspace[p].emg.getfs()
+        x = np.linspace(0, len(arr) / fs, len(arr)) if len(arr) > 0 else np.array([])
+        widgets.freq_timedomain.line(x, arr, channel)
         widgets.freq_timedomain.show()
         self.updateFreqAnalysisFFTPanel()
 
@@ -2416,6 +2494,9 @@ class MainWindow(QMainWindow):
         self.home = None
         self.filesystemTree = QFileSystemModel()
         self.selectedParticipants.clear()
+        self._crop_group.setEnabled(False)
+        self._crop_status_label.setText("Full trial (no crop)")
+        self._crop_status_label.setStyleSheet("color: gray; font-size: 10px;")
 
     def newWorkSpace(self, fpath, name):
         # create new project
@@ -2544,6 +2625,40 @@ class MainWindow(QMainWindow):
         v_split.setStretchFactor(1, 0)  # playbar stays compact
         widgets.verticalLayout_44.addWidget(v_split)
 
+    def _setup_emg_splitters(self):
+        """Replace the fixed layouts in the EMG processing page with QSplitters.
+
+        horizontalLayout_18 holds data_process_graphic (left, plots) and
+        data_process_instruction (right, pipeline/crop panel) in a plain QHBoxLayout.
+        verticalLayout_39 holds data_process_graphic_top (input plot) and
+        data_process_graphic_bottom (output plot) in a plain QVBoxLayout.
+        Both are replaced here so the user can resize panes at runtime.
+        """
+        # 1. Horizontal splitter: plots area | pipeline/config panel
+        h_split = QSplitter(Qt.Orientation.Horizontal)
+        h_split.setHandleWidth(4)
+        h_split.setChildrenCollapsible(False)
+        widgets.horizontalLayout_18.removeWidget(widgets.data_process_graphic)
+        widgets.horizontalLayout_18.removeWidget(widgets.data_process_instruction)
+        h_split.addWidget(widgets.data_process_graphic)
+        h_split.addWidget(widgets.data_process_instruction)
+        h_split.setStretchFactor(0, 2)  # plots take more horizontal space
+        h_split.setStretchFactor(1, 1)  # pipeline panel is narrower
+        widgets.horizontalLayout_18.addWidget(h_split)
+        widgets.data_process_instruction.setMinimumWidth(200)
+
+        # 2. Vertical splitter: input plot | output plot
+        v_split = QSplitter(Qt.Orientation.Vertical)
+        v_split.setHandleWidth(4)
+        v_split.setChildrenCollapsible(False)
+        widgets.verticalLayout_39.removeWidget(widgets.data_process_graphic_top)
+        widgets.verticalLayout_39.removeWidget(widgets.data_process_graphic_bottom)
+        v_split.addWidget(widgets.data_process_graphic_top)
+        v_split.addWidget(widgets.data_process_graphic_bottom)
+        v_split.setStretchFactor(0, 1)
+        v_split.setStretchFactor(1, 1)
+        widgets.verticalLayout_39.addWidget(v_split)
+
     def preloadKinematicPage(self):
         ps = self.workspace.getParticipants()
         self.populateKinematicTree(widgets.kinematics_label_tree, ps)
@@ -2588,11 +2703,11 @@ class MainWindow(QMainWindow):
 
     def addNewFFTtoFreqAnalysisFFTPanel(self):
         p, chan = self.freqAnalysis
-        tst = self.workspace[p].emg.getTST()
+        tst = self._get_freq_safe_tst(p, chan)
         try:
             left = float(widgets.lineEdit_5.text())
             right = float(widgets.lineEdit_4.text())
-            # check sanity
+            # check sanity against freq-safe segment duration
             if left < 0 or left > tst.time:
                 left = 0.0
             if right < 0 or right > tst.time:
@@ -2641,17 +2756,24 @@ class MainWindow(QMainWindow):
         cfg = self.workspace[p].emg.getProcessConfig()
         fs = self.workspace[p].emg.getfs()
         self._pipeline_panel.load(cfg, fs)
+        # Sync crop widget to trial duration and any previously saved crop interval
+        self._sync_crop_widget(p)
         self.selectSingleEMGStep(0)
 
     def __updateEMGRenderBuffer(self, prev=True, post=True):
         p, step, chan = self.singleEMG
+        crop = self.workspace[p].crop_interval
         if prev:
             if step == 0:
                 self.inputBuffer = self.workspace[p].emg[chan]
             else:
-                self.inputBuffer = self.workspace[p].emg.tryConfigStepTo(chan, step - 1)
+                self.inputBuffer = self.workspace[p].emg.tryConfigStepTo(
+                    chan, step - 1, crop
+                )
         if post:
-            self.outputBuffer = self.workspace[p].emg.tryConfigStepTo(chan, step)
+            self.outputBuffer = self.workspace[p].emg.tryConfigStepTo(
+                chan, step, crop
+            )
 
     def selectSingleEMGChannel(self, chan):
         p, step, oldchan = self.singleEMG
@@ -2738,6 +2860,59 @@ class MainWindow(QMainWindow):
 
     def _onBatchError(self, msg):
         logger.error("Batch process error: {}".format(msg))
+
+    # ------------------------------------------------------------------
+    # Manual EMG crop
+    # ------------------------------------------------------------------
+
+    def _sync_crop_widget(self, p):
+        """Sync crop spinbox range and values to participant p's trial and profile."""
+        emg = self.workspace[p].emg
+        total = emg.rawTST.time if emg.rawTST is not None else emg.emgTST.time
+        self._crop_start_spin.setRange(0.0, total)
+        self._crop_end_spin.setRange(0.0, total)
+        ci = self.workspace[p].crop_interval
+        if ci is not None:
+            self._crop_start_spin.setValue(ci[0])
+            self._crop_end_spin.setValue(ci[1])
+            self._crop_status_label.setText(
+                "Active: {:.3f} s → {:.3f} s".format(ci[0], ci[1])
+            )
+            self._crop_status_label.setStyleSheet("color: #2a9d8f; font-size: 10px;")
+        else:
+            self._crop_start_spin.setValue(0.0)
+            self._crop_end_spin.setValue(total)
+            self._crop_status_label.setText("Full trial (no crop)")
+            self._crop_status_label.setStyleSheet("color: gray; font-size: 10px;")
+        self._crop_group.setEnabled(True)
+
+    def _onCropApply(self):
+        p, _, _ = self.singleEMG
+        if p is None:
+            return
+        t_start = self._crop_start_spin.value()
+        t_end = self._crop_end_spin.value()
+        if t_end <= t_start:
+            QMessageBox.warning(
+                None,
+                self.tr("Crop"),
+                self.tr("End time must be greater than start time."),
+            )
+            return
+        self.workspace[p].crop_interval = (t_start, t_end)
+        self._crop_status_label.setText(
+            "Active: {:.3f} s → {:.3f} s".format(t_start, t_end)
+        )
+        self._crop_status_label.setStyleSheet("color: #2a9d8f; font-size: 10px;")
+        logger.info("EMG manual crop: {:.3f}s → {:.3f}s".format(t_start, t_end))
+
+    def _onCropClear(self):
+        p, _, _ = self.singleEMG
+        if p is None:
+            return
+        self.workspace[p].crop_interval = None
+        self._sync_crop_widget(p)
+        logger.info("EMG manual crop cleared for {}".format(p.name))
 
 
     def closeEvent(self, event):  # Window close event handler.

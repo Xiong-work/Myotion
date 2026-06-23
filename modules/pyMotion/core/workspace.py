@@ -25,6 +25,7 @@ class workspace:
             self.kinematic = kin
             self.loading = False
             self.extra_events = []  # user-created TrialEvents, persisted to workspace XML
+            self.crop_interval = None  # (t_start_s, t_end_s) or None; shared by EMG and kinematics
 
         def isLoading(self):
             return self.loading
@@ -57,6 +58,11 @@ class workspace:
                     e.addNode("context", xmlString(ev.context))
                     events_node.addSubTree(e)
                 root.addSubTree(events_node)
+            if self.crop_interval is not None:
+                ci = xmlElement("crop_interval")
+                ci.addNode("start", xmlString(float(self.crop_interval[0])))
+                ci.addNode("end", xmlString(float(self.crop_interval[1])))
+                root.addSubTree(ci)
             return root
 
         @staticmethod
@@ -98,6 +104,18 @@ class workspace:
                         profile_obj.extra_events.append(TrialEvent(t, l, c))
                     except Exception:
                         pass
+            # Restore crop interval from XML
+            profile_obj.crop_interval = None
+            ci_node = root.find("crop_interval")
+            if ci_node is not None:
+                try:
+                    s_el = ci_node.find("start")
+                    e_el = ci_node.find("end")
+                    if (s_el is not None and e_el is not None
+                            and s_el.text and e_el.text):
+                        profile_obj.crop_interval = (float(s_el.text), float(e_el.text))
+                except Exception:
+                    pass
             return profile_obj
 
     class reportEMGConfig:

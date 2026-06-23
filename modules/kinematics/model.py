@@ -5,6 +5,7 @@ class Model:
     """
 
     def __init__(self, data) -> None:
+        self.profile = data  # workspace.profile — owns crop_interval and extra_events
         self.kinematic = data.kinematic
         self.emg = data.emg
         # Reference to profile.extra_events so the controller can append without
