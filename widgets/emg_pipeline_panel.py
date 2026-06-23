@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QLabel, QCheckBox, QComboBox, QSpinBox, QFrame,
 )
 
-from modules.pyMotion.core.emg import emgConfigEnum, emgFilterEnum
+from modules.pyMotion.core.emg import emgConfigEnum, emgFilterEnum, emgNormTypeEnum
 
 _CARD_STYLE = (
     "QGroupBox {"
@@ -93,12 +93,29 @@ class EMGStepCard(QGroupBox):
         self._building = True
         t = cfg.id
 
-        if t in (emgConfigEnum.DC_OFFSET, emgConfigEnum.FULL_W_RECT, emgConfigEnum.NORMALIZATION):
+        if t in (emgConfigEnum.DC_OFFSET, emgConfigEnum.FULL_W_RECT):
             self._enable_cb = QCheckBox("Enable")
             self._enable_cb.setStyleSheet(_LBL)
             self._enable_cb.setChecked(cfg.enable)
             self._enable_cb.stateChanged.connect(self._onEnableChanged)
             layout.addLayout(self._row(self._enable_cb))
+
+        elif t == emgConfigEnum.NORMALIZATION:
+            self._enable_cb = QCheckBox("Enable")
+            self._enable_cb.setStyleSheet(_LBL)
+            self._enable_cb.setChecked(cfg.enable)
+            self._enable_cb.stateChanged.connect(self._onEnableChanged)
+            layout.addLayout(self._row(self._enable_cb))
+
+            self._norm_type_combo = QComboBox()
+            self._norm_type_combo.setStyleSheet(_COMBO)
+            self._norm_type_combo.addItem("MVC")
+            self._norm_type_combo.addItem("Trial Max")
+            self._norm_type_combo.setCurrentIndex(
+                int(getattr(cfg, 'norm_type', emgNormTypeEnum.MVC))
+            )
+            self._norm_type_combo.currentIndexChanged.connect(self._onNormTypeChanged)
+            layout.addLayout(self._row(self._lbl("Type:"), self._norm_type_combo))
 
         elif t == emgConfigEnum.FILTER:
             self._enable_cb = QCheckBox("Enable")
@@ -162,6 +179,12 @@ class EMGStepCard(QGroupBox):
         if self._building:
             return
         self._cfg.enable = bool(state)
+        self.configChanged.emit()
+
+    def _onNormTypeChanged(self, idx):
+        if self._building:
+            return
+        self._cfg.norm_type = emgNormTypeEnum(idx)
         self.configChanged.emit()
 
     def _onFilterTypeChanged(self, idx):

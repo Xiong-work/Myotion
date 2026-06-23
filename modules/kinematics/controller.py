@@ -54,6 +54,7 @@ class Controller:
         self.labeltree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.labeltree.customContextMenuRequested.connect(self._on_tree_context_menu)
         self._event_tree_root = None
+        self._crop_tree_item = None
 
         self.timer = QTimer()
         self.timer.start(int(1000 / self.model.kinematic_frame_rate()))
@@ -63,6 +64,8 @@ class Controller:
         self._refresh_event_tree()
         for ev in self.model.events:
             self.top.add_event(ev)
+        # Show crop interval if one was previously saved for this participant
+        self._refresh_crop_display()
 
         # Build force-channel lookup so tree_item_select() can find plate data.
         # Tree nodes are added by populateKinematicTree() in main.py under the
@@ -262,20 +265,88 @@ class Controller:
         self._event_tree_root = root
 
     def _on_tree_context_menu(self, pos):
-        """Right-click in label tree: offer Delete for user-created event items."""
+        """Right-click in label tree: crop and delete actions for events."""
         item = self.labeltree.itemAt(pos)
-        if item is None or item.parent() is not self._event_tree_root:
+        if item is None:
+            return
+
+        # Right-click on the crop display node → offer Clear
+        if item is self._crop_tree_item:
+            if self.model.profile.crop_interval is not None:
+                menu = QMenu()
+                clear_action = menu.addAction("Clear Crop Interval")
+                action = menu.exec(self.labeltree.viewport().mapToGlobal(pos))
+                if action == clear_action:
+                    self.model.profile.crop_interval = None
+                    self._refresh_crop_display()
+            return
+
+        # Right-click on event items
+        if self._event_tree_root is None or item.parent() is not self._event_tree_root:
             return
         idx = self._event_tree_root.indexOfChild(item)
         if idx < 0 or idx >= len(self.model.events):
             return
         event = self.model.events[idx]
-        # Only allow deleting user-created events (not C3D-sourced ones)
-        if event not in self.model.extra_events:
-            return
+
         menu = QMenu()
-        delete_action = menu.addAction("Delete: {}".format(event.label))
+        set_start_action = menu.addAction("Set Crop Start  ({:.3f} s)".format(event.time_s))
+        set_end_action = menu.addAction("Set Crop End  ({:.3f} s)".format(event.time_s))
+        delete_action = None
+        if event in self.model.extra_events:
+            menu.addSeparator()
+            delete_action = menu.addAction("Delete: {}".format(event.label))
+
         action = menu.exec(self.labeltree.viewport().mapToGlobal(pos))
-        if action == delete_action:
+        if action is None:
+            return
+        if action == set_start_action:
+            self._set_crop_start(event.time_s)
+        elif action == set_end_action:
+            self._set_crop_end(event.time_s)
+        elif delete_action is not None and action == delete_action:
             self._delete_event(event)
+
+    def _set_crop_start(self, t_start):
+        """Set crop start to t_start; keeps existing end or defaults to trial end."""
+        existing = self.model.profile.crop_interval
+        if existing is not None and existing[1] > t_start:
+            t_end = existing[1]
+        else:
+            t_end = self.model.total_time()
+        self.model.profile.crop_interval = (t_start, t_end)
+        self._refresh_crop_display()
+
+    def _set_crop_end(self, t_end):
+        """Set crop end to t_end; keeps existing start or defaults to 0."""
+        existing = self.model.profile.crop_interval
+        if existing is not None and existing[0] < t_end:
+            t_start = existing[0]
+        else:
+            t_start = 0.0
+        self.model.profile.crop_interval = (t_start, t_end)
+        self._refresh_crop_display()
+
+    def _refresh_crop_display(self):
+        """Add or update the Crop node under the participant tree item."""
+        if self._crop_tree_item is not None:
+            parent = self._crop_tree_item.parent()
+            if parent is not None:
+                parent.removeChild(self._crop_tree_item)
+            else:
+                idx = self.labeltree.indexOfTopLevelItem(self._crop_tree_item)
+                if idx >= 0:
+                    self.labeltree.takeTopLevelItem(idx)
+            self._crop_tree_item = None
+
+        ci = self.model.profile.crop_interval
+        if ci is None:
+            return
+
+        crop_item = QTreeWidgetItem(["Crop: {:.3f} s → {:.3f} s".format(ci[0], ci[1])])
+        if self.participant_item is not None:
+            self.participant_item.addChild(crop_item)
+        else:
+            self.labeltree.addTopLevelItem(crop_item)
+        self._crop_tree_item = crop_item
 
