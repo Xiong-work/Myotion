@@ -129,7 +129,7 @@ class EMGAddWindow(QMainWindow):
         self.channels = []
         self.mvcfiles = []
         self.mvcfilesMap = {}  # mapping mvc_file -> chan
-        self.jointMap = {}  # mapping chan -> joints (short name)
+        self.muscleMap = {}  # mapping chan -> muscle (short name)
         self.isEnabled = {}  # isEnabled[chan] = T/F
 
         self.widgets.import_btn.clicked.connect(self.importEMGBtnClicked)
@@ -236,17 +236,17 @@ class EMGAddWindow(QMainWindow):
         comboBox = QComboBox()
         comboBox.setObjectName(chan)
         comboBox.setEditable(True)
-        for j in jointName.short:
-            comboBox.addItem(jointName.getConcatName(j))
+        for j in muscleName.short:
+            comboBox.addItem(muscleName.getConcatName(j))
 
         # Configure QCompleter and enable fuzzy matching.
-        completer = QCompleter([jointName.getConcatName(j) for j in jointName.short], comboBox)
+        completer = QCompleter([muscleName.getConcatName(j) for j in muscleName.short], comboBox)
         completer.setFilterMode(Qt.MatchContains)
         completer.setCaseSensitivity(Qt.CaseInsensitive)  # Case-insensitive matching.
         comboBox.setCompleter(completer)
-        
-        if chan in self.jointMap:
-            comboBox.setCurrentText(jointName.getConcatName(self.jointMap[chan]))
+
+        if chan in self.muscleMap:
+            comboBox.setCurrentText(muscleName.getConcatName(self.muscleMap[chan]))
         else:
             comboBox.setCurrentIndex(-1)
         comboBox.currentIndexChanged.connect(self.jointBoxChanged)
@@ -288,7 +288,7 @@ class EMGAddWindow(QMainWindow):
     def jointBoxChanged(self, index):
         jointbox = self.sender()
         chan = jointbox.objectName()
-        self.jointMap[chan] = jointName.short[index]
+        self.muscleMap[chan] = muscleName.short[index]
 
     def MVCFilesChanged(self, index):
         mvcBox = self.sender()
@@ -456,7 +456,7 @@ class EMGAddWindow(QMainWindow):
         for c in self.channels:
             # set only when possiblity bigger than 50%
             candidate_list = self.workspace.matchChanToJoint(
-                c, jointName.short, lower_bound=50
+                c, muscleName.short, lower_bound=50
             )
             if len(candidate_list) == 0:
                 continue
@@ -467,7 +467,7 @@ class EMGAddWindow(QMainWindow):
                         joint, c, possibility
                     )
                 )
-                self.jointMap[c] = joint
+                self.muscleMap[c] = joint
 
     def sanity(self):
         # check emg file is selected
@@ -514,7 +514,7 @@ class EMGAddWindow(QMainWindow):
             return False
         # check all joint names are selected
         for c in self.channels:
-            if c not in self.jointMap and self.isEnabled[c]:
+            if c not in self.muscleMap and self.isEnabled[c]:
                 QMessageBox.critical(
                     None,
                     self.tr("error"),
@@ -524,7 +524,7 @@ class EMGAddWindow(QMainWindow):
                 return False
         # check joint name is unique
         used_joint = {}
-        for chan, joint in self.jointMap.items():
+        for chan, joint in self.muscleMap.items():
             if self.isEnabled[chan] and joint in used_joint:
                 chan2 = used_joint[joint]
                 if self.isEnabled[chan2]:
@@ -557,7 +557,7 @@ class EMGAddWindow(QMainWindow):
             if c not in self.channels:
                 self.emg.removeChannel(c)
 
-        for old, new in self.jointMap.items():
+        for old, new in self.muscleMap.items():
             if self.isEnabled[old]:
                 self.emg.renameChannel(old, new)
 
@@ -568,7 +568,7 @@ class EMGAddWindow(QMainWindow):
                     chan, os.path.basename(self.mvcfiles[index])
                 )
 
-        for chan, joint in self.jointMap.items():
+        for chan, joint in self.muscleMap.items():
             if self.isEnabled[chan]:
                 self.workspace.addChanToJointMap(chan, joint)
 
