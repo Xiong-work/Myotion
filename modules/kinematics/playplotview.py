@@ -16,16 +16,49 @@ class PlayPlotWidget(QWidget):
         self.pen = pg.mkPen(color="#586cdb", width=2)
 
     def add_line(self, x, y, name, type="emg", rate=1):
-        plt = pg.plot(x, y, name=name, pen=self.pen, clear=True, autoDownsample=True)
-        self.playline.append({'line': plt.addLine(x=5, pen=pg.mkPen(color="r", width=2)), 'rate': rate})
-        self._plot_refs.append({'widget': plt, 'rate': rate})
+        plt = pg.PlotWidget()
+
+        # --- Plotly-style appearance ---
+        # Inner ViewBox background matches EMG plot background
         plt.setBackground("#e5ecf6")
-        plt.setRange(xRange=[0, max(x)])
+        # Outer widget area (axis margins) also light so there's no dark border
+        plt.setStyleSheet("background-color: #f0f4fb; border: none;")
+
+        # Dark axis pens and labels on the light background
+        _text_pen = pg.mkPen(color="#444")
+        _axis_pen = pg.mkPen(color="#bbb", width=1)
+        for ax_name in ("left", "bottom", "right", "top"):
+            ax = plt.getAxis(ax_name)
+            ax.setPen(_axis_pen)
+            ax.setTextPen(_text_pen)
+        plt.getAxis("right").setStyle(showValues=False)
+        plt.getAxis("top").setStyle(showValues=False)
+
+        # Channel name as subplot title (e.g. "BF-L.x")
+        plt.setTitle(name, color="#444", size="9pt")
+
+        x_label = "Frame" if type == "marker" else "Time(s)"
+        plt.setLabel("left", "Magnitude", color="#555", size="9pt")
+        plt.setLabel("bottom", x_label, color="#555", size="9pt")
+
+        # Subtle grid to match Plotly's light gridlines
+        plt.showGrid(x=True, y=True, alpha=0.18)
+
+        # Plot the data
+        plt.plot(x, y, name=name, pen=self.pen, autoDownsample=True)
+        plt.setXRange(0, max(x) if len(x) and max(x) > 0 else 1)
+
+        # Playback cursor (red vertical line)
+        cursor = plt.addLine(x=0, pen=pg.mkPen(color="r", width=2))
+        self.playline.append({'line': cursor, 'rate': rate})
+        self._plot_refs.append({'widget': plt, 'rate': rate})
+
         # Draw any already-registered events onto this new plot
         for em in self._event_markers:
             x_pos = em['event'].time_s * rate
             line = plt.addLine(x=x_pos, pen=_EVENT_PEN)
             em['items'].append((plt, line))
+
         self.lo.addWidget(plt)
 
     def update(self, frame):
@@ -66,9 +99,10 @@ class PlayPlotWidget(QWidget):
     def clear(self):
         """Remove all plots and reset tracking state."""
         while self.lo.count():
-            widget = self.lo.itemAt(0).widget()
-            self.lo.removeWidget(widget)
-            widget.close()
+            item = self.lo.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         self.playline.clear()
         self._plot_refs.clear()
         self._event_markers.clear()

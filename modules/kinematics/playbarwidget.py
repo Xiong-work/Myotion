@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QFrame,
     QComboBox,
-    QCheckBox,
 )
 from PySide6.QtCore import Qt, QPoint, QRect, Signal
 
@@ -30,7 +29,7 @@ buttonStyle = """
         border-radius: 5px;
         padding: 5px 12px;
         color: #ddd;
-        font: 10pt "Segoe UI";
+        font: bold 10pt "Segoe UI";
         height: 25px;
         min-width: 60px;
     }
@@ -52,6 +51,35 @@ buttonStyle = """
         border: 1px solid #444;
     }
 """
+
+_stepStyle = (
+    "QComboBox {"
+    " background-color: #343b48;"
+    " color: #ddd;"
+    " border: 1px solid #495474;"
+    " border-radius: 5px;"
+    " padding: 5px 8px;"
+    " height: 25px;"
+    " min-width: 80px;"
+    " font: bold 10pt 'Segoe UI';"
+    "}"
+    "QComboBox:hover { border: 1px solid #bd93f9; }"
+    "QComboBox::drop-down {"
+    " subcontrol-origin: padding;"
+    " subcontrol-position: top right;"
+    " width: 20px;"
+    " border-left: 1px solid #495474;"
+    " border-top-right-radius: 4px;"
+    " border-bottom-right-radius: 4px;"
+    "}"
+    "QComboBox QAbstractItemView {"
+    " background-color: #343b48;"
+    " color: #ddd;"
+    " border: 1px solid #495474;"
+    " selection-background-color: #495474;"
+    " selection-color: #f4f4f4;"
+    "}"
+)
 
 
 class SliderWidget(QSlider):
@@ -235,19 +263,16 @@ class PlayBarWidget(QWidget):
 
         self.step = QComboBox(self.button_group)
         self.step.addItems([self.tr("Increment"), "5", "10", "20", "50", "100"])
-        self.step.setStyleSheet(
-            "QComboBox { background-color: #333b46; color: #f4f4f4;"
-            " border-radius: 4px; border: 1px solid #495474; padding: 4px 8px; }"
-            "QComboBox:hover { border: 1px solid #bd93f9; }"
-        )
+        self.step.setStyleSheet(_stepStyle)
 
         self.markEventButton = QPushButton(self.tr("Mark Event"), self.button_group)
         self.markEventButton.setStyleSheet(buttonStyle)
         self.markEventButton.clicked.connect(self.eventMarkRequested)
 
-        self.filterCheck = QCheckBox(self.tr("Filter"), self.button_group)
+        self.filterCheck = QPushButton(self.tr("Filter"), self.button_group)
+        self.filterCheck.setCheckable(True)
         self.filterCheck.setChecked(True)  # filtering on by default
-        self.filterCheck.setStyleSheet("color: #c8c8c8;")
+        self.filterCheck.setStyleSheet(buttonStyle)
 
         hboxlayout = QHBoxLayout(self.button_group)
         hboxlayout.addStretch()

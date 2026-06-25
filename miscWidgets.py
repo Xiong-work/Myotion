@@ -56,6 +56,29 @@ from PySide6.QtWidgets import (
 from path import *
 
 
+class ScaledImageLabel(QLabel):
+    """QLabel that scales its pixmap to fill the available space while keeping aspect ratio."""
+
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        self._source = pixmap
+        self.setAlignment(Qt.AlignCenter)
+        self.setSizePolicy(
+            QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._source and not self._source.isNull():
+            self.setPixmap(
+                self._source.scaled(
+                    self.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+
+
 class LoadingGif(QLabel):
     loading = None
 

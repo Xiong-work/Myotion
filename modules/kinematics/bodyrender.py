@@ -1,7 +1,9 @@
+import os as _os
 from math import pi
 
 import numpy as np
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
 from OpenGL.GL import *
 
@@ -12,6 +14,12 @@ from .movmentrig import MovementRig
 from .object3d import Object3D
 from .renderer import Renderer
 
+_WATERMARK_PATH = _os.path.normpath(
+    _os.path.join(
+        _os.path.dirname(__file__), "..", "..", "myotion_resources", "fulllogo_transparent.png"
+    )
+)
+
 
 class BodyRender(Base):
     def __init__(self, parent: QWidget = None) -> None:
@@ -20,6 +28,12 @@ class BodyRender(Base):
         self.point = None
         self._plate_geo = []       # ForceWireItem instances currently in scene
         self._plate_geo_added = False  # deferred first-paint flag
+        # Branding watermark — loaded once, rendered each frame at low opacity
+        _raw = QPixmap(_WATERMARK_PATH)
+        self._watermark = (
+            _raw.scaledToWidth(220, Qt.TransformationMode.SmoothTransformation)
+            if not _raw.isNull() else None
+        )
 
     def initializeGL(self) -> None:
         super().initializeGL()
@@ -70,6 +84,16 @@ class BodyRender(Base):
 
         self.renderer.render(self.scene, self.camera)
         self.rig.update(self.input, self.deltaTime)
+
+        # Branding watermark — draw transparent logo in the bottom-right corner
+        if self._watermark is not None:
+            painter = QPainter(self)
+            painter.setOpacity(0.18)
+            margin = 12
+            x = self.width() - self._watermark.width() - margin
+            y = self.height() - self._watermark.height() - margin
+            painter.drawPixmap(x, y, self._watermark)
+            painter.end()
 
     def _sample_force(self, fp):
         """Return a ForceVectorItem anchored at the plate centre, or None."""
