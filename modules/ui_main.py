@@ -1889,7 +1889,7 @@ class Ui_MainWindow(object):
             self.data_process.sizePolicy().hasHeightForWidth()
         )
         self.data_process.setSizePolicy(sizePolicy11)
-        self.data_process.setStyleSheet("background-color:#f4f4f4;\n" "border: none;")
+        self.data_process.setStyleSheet("background-color:#21242b;\n" "border: none;")
         self.data_process.setFrameShape(QFrame.StyledPanel)
         self.data_process.setFrameShadow(QFrame.Raised)
         self.horizontalLayout_18 = QHBoxLayout(self.data_process)
@@ -2061,7 +2061,7 @@ class Ui_MainWindow(object):
         )
         self.data_process_instruction.setSizePolicy(sizePolicy9)
         self.data_process_instruction.setStyleSheet(
-            "border-left:1px solid rgba(0,0,0,0.1);"
+            "border-left:1px solid rgba(255,255,255,0.1);"
         )
         self.data_process_instruction.setFrameShape(QFrame.StyledPanel)
         self.data_process_instruction.setFrameShadow(QFrame.Raised)
@@ -3443,7 +3443,7 @@ class Ui_MainWindow(object):
             self.kinematics_left_top.sizePolicy().hasHeightForWidth()
         )
         self.kinematics_left_top.setSizePolicy(sizePolicy12)
-        self.kinematics_left_top.setStyleSheet("background-color:#f4f4f4;")
+        self.kinematics_left_top.setStyleSheet("background-color:#21242b;")
         self.kinematics_left_top.setFrameShape(QFrame.StyledPanel)
         self.kinematics_left_top.setFrameShadow(QFrame.Raised)
         self.horizontalLayout_37 = QHBoxLayout(self.kinematics_left_top)
@@ -3501,7 +3501,7 @@ class Ui_MainWindow(object):
         self.label_current_process.setStyleSheet(
             "font-weight: bold;\n"
             "font-size:12px;\n"
-            "color: rgba(0,0,0,0.8);\n"
+            "color: #c8c8c8;\n"
             "margin-left: 4px;\n"
             "border: none;"
         )
@@ -3594,7 +3594,7 @@ class Ui_MainWindow(object):
         )
         self.kinematics_right.setSizePolicy(sizePolicy9)
         self.kinematics_right.setStyleSheet(
-            "background-color:#f4f4f4;\n" "border:none;"
+            "background-color:#21242b;\n" "border:none;"
         )
         self.kinematics_right.setFrameShape(QFrame.StyledPanel)
         self.kinematics_right.setFrameShadow(QFrame.Raised)
@@ -3603,14 +3603,14 @@ class Ui_MainWindow(object):
         self.kinematics_label_tree = QTreeWidget(self.kinematics_right)
         self.kinematics_label_tree.setObjectName("kinematics_labels")
         self.kinematics_label_tree.setStyleSheet(
-            "font-size:11px;\n" "color:rgba(#f4f4f4);"
+            "font-size:11px;\n" "color:#f4f4f4;"
         )
         self.kinematics_label_tree.setFrameShape(QFrame.NoFrame)
         self.kinematics_label_tree.setFrameShadow(QFrame.Sunken)
         self.kinematics_label_tree.setLineWidth(1)
         self.kinematics_label_tree.setMidLineWidth(0)
         self.kinematics_label_tree.setSizeAdjustPolicy(
-            QAbstractScrollArea.AdjustToContents
+            QAbstractScrollArea.AdjustIgnored
         )
         self.kinematics_label_tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.kinematics_label_tree.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -4359,7 +4359,7 @@ class Ui_MainWindow(object):
         self.frequency_participants = QTreeWidget()
         self.frequency_participants.setObjectName("frequency_participants")
         self.frequency_participants.setStyleSheet(
-            "font-size:11px;\n" "color:rgba(#f4f4f4);"
+            "font-size:11px;\n" "color:#f4f4f4;"
         )
         self.frequency_participants.setFrameShape(QFrame.NoFrame)
         self.frequency_participants.setFrameShadow(QFrame.Sunken)

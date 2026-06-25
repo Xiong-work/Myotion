@@ -157,7 +157,7 @@ color:#f4f4f4;</string>
             <string notr="true">color:#f4f4f4;
 background-color: #333b46;
 padding:8px 8px;
-marging:2px 2px;
+margin: 2px 2px;
 border-radius:8px;</string>
            </property>
            <property name="text">
@@ -178,7 +178,7 @@ border-radius:8px;</string>
             <string notr="true">color:#f4f4f4;
 background-color: #333b46;
 padding:8px 8px;
-marging:2px 2px;
+margin: 2px 2px;
 border-radius:8px;</string>
            </property>
            <property name="text">
@@ -266,8 +266,8 @@ color:#f4f4f4;</string>
       </sizepolicy>
      </property>
      <property name="styleSheet">
-      <string notr="true">background-color:#f4f4f4;
-border:none;</string>
+      <string notr="true">background-color: #21242b;
+border: none;</string>
      </property>
      <property name="frameShape">
       <enum>QFrame::StyledPanel</enum>
@@ -294,8 +294,8 @@ border:none;</string>
       <item>
        <widget class="QFrame" name="frame_2">
         <property name="styleSheet">
-         <string notr="true">background-color: #cccccc;
-padding:2px 0px;</string>
+         <string notr="true">background-color: #2c3039;
+padding: 4px 6px;</string>
         </property>
         <property name="frameShape">
          <enum>QFrame::StyledPanel</enum>
@@ -326,8 +326,10 @@ padding:2px 0px;</string>
          <item>
           <widget class="QLineEdit" name="lineEdit">
            <property name="styleSheet">
-            <string notr="true">background-color: rgba(255,255,255,1);
-margin:2px 2px;</string>
+            <string notr="true">background-color: #333b46;
+color: #f4f4f4;
+margin: 2px 2px;
+border-radius: 4px;</string>
            </property>
           </widget>
          </item>
@@ -496,7 +498,7 @@ margin:2px 2px;</string>
             <string notr="true">color:#f4f4f4;
 background-color: #333b46;
 padding:8px 8px;
-marging:2px 2px;
+margin: 2px 2px;
 border-radius:8px;</string>
            </property>
            <property name="text">
@@ -513,7 +515,7 @@ border-radius:8px;</string>
             <string notr="true">color:#f4f4f4;
 background-color: #333b46;
 padding:8px 8px;
-marging:2px 2px;
+margin: 2px 2px;
 border-radius:8px;</string>
            </property>
            <property name="text">

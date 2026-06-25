@@ -461,7 +461,7 @@ padding:10px;</string>
              </sizepolicy>
             </property>
             <property name="styleSheet">
-             <string notr="true">background-color:rgba(255,255,255,1);</string>
+             <string notr="true">background-color: #21242b;</string>
             </property>
             <property name="frameShape">
              <enum>QFrame::StyledPanel</enum>
@@ -755,7 +755,7 @@ padding:10px;</string>
                 <string notr="true">color:#f4f4f4;
 background-color: #333b46;
 padding:8px 8px;
-marging:2px 2px;
+margin: 2px 2px;
 border-radius:8px;</string>
                </property>
                <property name="text">
@@ -772,7 +772,7 @@ border-radius:8px;</string>
                 <string notr="true">color:#f4f4f4;
 background-color: #333b46;
 padding:8px 8px;
-marging:2px 2px;
+margin: 2px 2px;
 border-radius:8px;</string>
                </property>
                <property name="text">
