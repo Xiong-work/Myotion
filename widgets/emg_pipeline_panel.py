@@ -55,11 +55,18 @@ _STEP_NAMES = {
 
 class EMGStepCard(QGroupBox):
     configChanged = Signal()
+    clicked = Signal()
 
     def __init__(self, step_index, step_cfg, fs, parent=None):
-        title = "Step {}: {}".format(
-            step_index + 1, _STEP_NAMES.get(step_cfg.id, "Unknown")
-        )
+        if step_cfg.id == emgConfigEnum.FILTER:
+            _fname = (
+                "Low-pass Filter"
+                if (hasattr(step_cfg, "type") and int(step_cfg.type) == int(emgFilterEnum.LOW_PASS))
+                else "Band-pass Filter"
+            )
+            title = "Step {}: {}".format(step_index + 1, _fname)
+        else:
+            title = "Step {}: {}".format(step_index + 1, _STEP_NAMES.get(step_cfg.id, "Unknown"))
         super().__init__(title, parent)
         self.setStyleSheet(_CARD_STYLE)
         self._step_index = step_index
@@ -71,6 +78,10 @@ class EMGStepCard(QGroupBox):
         layout.setContentsMargins(8, 16, 8, 8)
         layout.setSpacing(4)
         self._build_controls(layout, step_cfg)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self.clicked.emit()
 
     # ------------------------------------------------------------------ helpers
 
@@ -221,6 +232,7 @@ class EMGStepCard(QGroupBox):
 
 class EMGPipelinePanel(QWidget):
     configChanged = Signal(int)  # step index that changed
+    stepSelected = Signal(int)   # step index clicked by user
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -255,6 +267,7 @@ class EMGPipelinePanel(QWidget):
         for i, step_cfg in enumerate(emg_cfg.stepConfig):
             card = EMGStepCard(i, step_cfg, fs, self._container)
             card.configChanged.connect(lambda idx=i: self.configChanged.emit(idx))
+            card.clicked.connect(lambda idx=i: self.stepSelected.emit(idx))
             self._vbox.addWidget(card)
             self._cards.append(card)
 

@@ -798,6 +798,13 @@ class MainWindow(QMainWindow):
         self.applyModernWidgetStyle()
         self._setup_kinematics_splitters()
         self._setup_emg_splitters()
+        self._setup_start_page_splitter()
+        self._setup_emg_page_splitters()
+        self._setup_kinematics_page_splitter()
+        self._setup_frequency_page_splitters()
+        self._replace_start_middle_with_logo()
+        widgets.middle.hide()   # sign-in / sign-up removed (open-source build)
+        self._generate_custom_icons()
 
         # QTableWidget PARAMETERS
         # ///////////////////////////////////////////////////////////////
@@ -963,6 +970,7 @@ class MainWindow(QMainWindow):
         self._pipeline_panel = EMGPipelinePanel(widgets.data_process_instruction)
         widgets.verticalLayout_42.insertWidget(0, self._pipeline_panel)
         self._pipeline_panel.configChanged.connect(self._onPipelineStepChanged)
+        self._pipeline_panel.stepSelected.connect(self.selectSingleEMGStep)
 
         # Manual crop group — compact widget at the top of the instruction panel
         _LBL_S = "color: #c8c8c8; font-size: 9pt;"
@@ -1400,9 +1408,213 @@ class MainWindow(QMainWindow):
             # Set the theme base first, then append mode-aware contrast rules.
             self.ui.styleSheet.setStyleSheet(qss)
             self.applyModernWidgetStyle(mode)
+            self._applyThemeWidgetOverrides(mode)
         except Exception as e:
             QMessageBox.warning(self, self.tr("Theme Error"),
                                 self.tr(f"Could not load theme: {e}"))
+
+    def _applyThemeWidgetOverrides(self, mode: str):
+        """Override per-widget inline styles from setupUi that don't change with the QSS.
+
+        setupUi() sets hardcoded dark-mode colors on individual widgets via setStyleSheet().
+        Because a widget's own stylesheet beats its parent's, the QSS file alone can't fix
+        them.  This method re-applies the correct values for each mode.
+        """
+        if mode == "light":
+            # EMG processing panel: remove near-black background so the light page bg shows
+            widgets.data_process.setStyleSheet("background-color: transparent; border: none;")
+            widgets.data_process_instruction.setStyleSheet(
+                "border-left: 1px solid rgba(0,0,0,0.12);"
+            )
+            widgets.toolBox.setStyleSheet(
+                "color: rgba(0,0,0,0.7); border: none; font-weight: bold;"
+            )
+            widgets.label_11.setStyleSheet(
+                "font-weight: bold; font-size: 12px; color: rgba(0,0,0,0.75);"
+                " margin-left: 4px; border: none;"
+            )
+            widgets.label_12.setStyleSheet(
+                "font-weight: bold; font-size: 12px; color: rgba(0,0,0,0.75);"
+                " margin-left: 4px; border: none;"
+            )
+            # Top bar menu buttons: dark bg clashes with the purple header in light mode
+            _menu_btn = (
+                "background-color: rgba(255,255,255,0.15);"
+                " border-radius: 24px; padding: 6px 0px; color: #f8f8f2;"
+            )
+            for btn in [widgets.fileMenu, widgets.displayMenu, widgets.toolsMenu,
+                        widgets.settingsMenu, widgets.helpMenu]:
+                btn.setStyleSheet(_menu_btn)
+            # Start-page sign in / sign up buttons
+            widgets.signInButton.setStyleSheet(
+                "background-color: #6272a4; color: #f8f8f2;"
+            )
+            widgets.signUpButton.setStyleSheet(
+                "background-color: #6272a4; color: #f8f8f2;"
+            )
+            # Workspace / participant sidebar (sidebar is dark purple in both themes)
+            _sidebar_tree = (
+                "font-size: 14px; color: rgba(255,255,255,0.85);"
+                " background-color: #3a405c; border: none;"
+            )
+            widgets.treeView.setStyleSheet(_sidebar_tree)
+            widgets.listWidget_3.setStyleSheet(
+                "background-color: #3a405c; color: rgba(255,255,255,0.8); border: none;"
+            )
+            widgets.pushButton_17.setStyleSheet("background-color: #6272a4; margin: 3px 2px;")
+            widgets.pushButton_18.setStyleSheet("background-color: #6272a4; margin: 3px 2px;")
+            widgets.frame_55.setStyleSheet("border-top: 1px solid rgba(0,0,0,0.15);")
+            widgets.frame_51.setStyleSheet("border-top: 1px solid rgba(0,0,0,0.15);")
+            # Frequency page — restore light-mode backgrounds and label colors
+            _freq_bg = "background-color: #f4f4f4; border: none;"
+            widgets.frequency_top.setStyleSheet(_freq_bg)
+            widgets.frequency_bottom.setStyleSheet(_freq_bg)
+            widgets.frequency_right.setStyleSheet("background-color: #f4f4f4;")
+            _freq_lbl = "font-weight: bold; font-size: 14px; color: rgba(0,0,0,0.4);"
+            widgets.label_15.setStyleSheet(_freq_lbl)
+            widgets.label_40.setStyleSheet(_freq_lbl)
+            widgets.label_16.setStyleSheet(_freq_lbl)
+            widgets.label_50.setStyleSheet(_freq_lbl)
+            widgets.label_13.setStyleSheet("color: rgba(0,0,0,0.8); font-weight: bold;")
+            widgets.label_14.setStyleSheet(
+                "font-weight: bold; font-size: 14px; color: rgba(0,0,0,0.4);"
+            )
+            widgets.label.setStyleSheet("color: rgba(0,0,0,0.8); font-weight: bold;")
+            _freq_input = (
+                "background-color: rgb(255,255,255);"
+                " color: rgba(0,0,0,0.6); font-weight: bold;"
+                " border: 1px solid #c0c8dc; border-radius: 4px;"
+            )
+            widgets.lineEdit_4.setStyleSheet(_freq_input)
+            widgets.lineEdit_5.setStyleSheet(_freq_input)
+            widgets.lineEdit_6.setStyleSheet(_freq_input)
+            _freq_combo = (
+                "background-color: rgb(255,255,255); margin: 0px 10px;"
+                " font-weight: bold; font-size: 14px; color: rgba(0,0,0,1);"
+            )
+            widgets.comboBox_19.setStyleSheet(_freq_combo)
+            widgets.comboBox_20.setStyleSheet(_freq_combo)
+            widgets.frequency_participants.setStyleSheet(
+                "font-size: 11px; color: #44475a;"
+            )
+            # Frequency action buttons — use theme accent color in light mode
+            _freq_btn = "background-color: #6272a4; color: #f8f8f2; margin: 3px 2px;"
+            widgets.pushButton_28.setStyleSheet(_freq_btn)
+            widgets.pushButton_30.setStyleSheet(_freq_btn)
+            widgets.pushButton_29.setStyleSheet(
+                "background-color: #6272a4; color: #f8f8f2;"
+            )
+            widgets.pushButton_32.setStyleSheet(
+                "background-color: #6272a4; color: #f8f8f2;"
+            )
+            # EMG Configuration File panel — restore light-mode colors
+            widgets.frame_25.setStyleSheet("background-color: #f4f4f4; border: none;")
+            widgets.label_21.setStyleSheet(
+                "font-weight: bold; font-size: 12px; color: rgba(0,0,0,0.8);"
+                " margin-left: 4px; border: none;"
+            )
+            widgets.pushButton_15.setStyleSheet(
+                "background-color: rgba(0,0,0,0.8); margin: 3px 2px;"
+            )
+            widgets.listWidget_2.setStyleSheet(
+                "font-size: 11px; color: rgba(0,0,0,0.5);"
+            )
+        else:  # dark — restore the original dark-mode inline values
+            widgets.data_process.setStyleSheet("background-color: #21242b; border: none;")
+            widgets.data_process_instruction.setStyleSheet(
+                "border-left: 1px solid rgba(255,255,255,0.1);"
+            )
+            widgets.toolBox.setStyleSheet(
+                "color: rgba(255,255,255,0.75); border: none; font-weight: bold;"
+            )
+            widgets.label_11.setStyleSheet(
+                "font-weight: bold; font-size: 12px; color: rgba(255,255,255,0.85);"
+                " margin-left: 4px; border: none;"
+            )
+            widgets.label_12.setStyleSheet(
+                "font-weight: bold; font-size: 12px; color: rgba(255,255,255,0.85);"
+                " margin-left: 4px; border: none;"
+            )
+            _menu_btn = (
+                "background-color: #2a2e37; border-radius: 24px; padding: 6px 0px;"
+            )
+            for btn in [widgets.fileMenu, widgets.displayMenu, widgets.toolsMenu,
+                        widgets.settingsMenu, widgets.helpMenu]:
+                btn.setStyleSheet(_menu_btn)
+            widgets.signInButton.setStyleSheet("background-color: rgb(52, 59, 72);")
+            widgets.signUpButton.setStyleSheet("background-color: rgb(52, 59, 72);")
+            _sidebar_tree = (
+                "font-size: 14px; color: rgba(255,255,255,0.85);"
+                " background-color: #3a405c; border: none;"
+            )
+            widgets.treeView.setStyleSheet(_sidebar_tree)
+            widgets.listWidget_3.setStyleSheet(
+                "background-color: #3a405c; color: rgba(255,255,255,0.8); border: none;"
+            )
+            widgets.pushButton_17.setStyleSheet(
+                "background-color: rgba(255,255,255,0.15); margin: 3px 2px;"
+            )
+            widgets.pushButton_18.setStyleSheet(
+                "background-color: rgba(255,255,255,0.15); margin: 3px 2px;"
+            )
+            widgets.frame_55.setStyleSheet("border-top: 1px solid rgba(255,255,255,0.2);")
+            widgets.frame_51.setStyleSheet("border-top: 1px solid rgba(255,255,255,0.2);")
+            # Frequency page — restore dark-mode backgrounds and label colors
+            _freq_bg = "background-color: #21242b; border: none;"
+            widgets.frequency_top.setStyleSheet(_freq_bg)
+            widgets.frequency_bottom.setStyleSheet(_freq_bg)
+            widgets.frequency_right.setStyleSheet("background-color: #21242b;")
+            _freq_lbl = "font-weight: bold; font-size: 14px; color: rgba(255,255,255,0.7);"
+            widgets.label_15.setStyleSheet(_freq_lbl)
+            widgets.label_40.setStyleSheet(_freq_lbl)
+            widgets.label_16.setStyleSheet(_freq_lbl)
+            widgets.label_50.setStyleSheet(_freq_lbl)
+            widgets.label_13.setStyleSheet(
+                "color: rgba(255,255,255,0.7); font-weight: bold;"
+            )
+            widgets.label_14.setStyleSheet(
+                "font-weight: bold; font-size: 14px; color: rgba(255,255,255,0.6);"
+            )
+            widgets.label.setStyleSheet(
+                "color: rgba(255,255,255,0.7); font-weight: bold;"
+            )
+            _freq_input = (
+                "background-color: rgb(44,49,60);"
+                " color: rgba(255,255,255,0.85); font-weight: bold;"
+                " border: 1px solid rgba(255,255,255,0.2); border-radius: 4px;"
+            )
+            widgets.lineEdit_4.setStyleSheet(_freq_input)
+            widgets.lineEdit_5.setStyleSheet(_freq_input)
+            widgets.lineEdit_6.setStyleSheet(_freq_input)
+            _freq_combo = (
+                "background-color: rgb(33,37,43); margin: 0px 10px;"
+                " font-weight: bold; font-size: 14px; color: rgba(255,255,255,0.85);"
+            )
+            widgets.comboBox_19.setStyleSheet(_freq_combo)
+            widgets.comboBox_20.setStyleSheet(_freq_combo)
+            widgets.frequency_participants.setStyleSheet(
+                "font-size: 11px; color: #f4f4f4;"
+            )
+            widgets.pushButton_28.setStyleSheet(
+                "background-color: rgba(255,255,255,0.15); margin: 3px 2px;"
+            )
+            widgets.pushButton_30.setStyleSheet(
+                "background-color: rgba(255,255,255,0.15); margin: 3px 2px;"
+            )
+            widgets.pushButton_29.setStyleSheet("background-color: rgb(52, 59, 72);")
+            widgets.pushButton_32.setStyleSheet("background-color: rgb(52, 59, 72);")
+            # EMG Configuration File panel — restore dark-mode colors
+            widgets.frame_25.setStyleSheet("background-color: #21242b; border: none;")
+            widgets.label_21.setStyleSheet(
+                "font-weight: bold; font-size: 12px; color: rgba(255,255,255,0.85);"
+                " margin-left: 4px; border: none;"
+            )
+            widgets.pushButton_15.setStyleSheet(
+                "background-color: rgba(255,255,255,0.15); margin: 3px 2px;"
+            )
+            widgets.listWidget_2.setStyleSheet(
+                "font-size: 11px; color: rgba(255,255,255,0.7);"
+            )
 
     def ifOldProjectOpened(self):
         if self.workspace is not None:
@@ -2198,11 +2410,14 @@ class MainWindow(QMainWindow):
         x = self.workspace[p].emg.getLinspace()
         # push data to plot
 
+        ci = self.workspace[p].crop_interval
+        xrange = list(ci) if ci else None
+
         if prev:
-            widgets.plot_input.line(x, self.inputBuffer, chan)
+            widgets.plot_input.line(x, self.inputBuffer, chan, color=["#7b91d6"], xrange=xrange)
             widgets.plot_input.show()
         if post:
-            widgets.plot_output.line(x, self.outputBuffer, chan)
+            widgets.plot_output.line(x, self.outputBuffer, chan, color=["#e05c5c"], xrange=xrange)
             widgets.plot_output.show()
 
     def showPipelineOverview(self):
@@ -2616,6 +2831,7 @@ class MainWindow(QMainWindow):
         h_split.addWidget(widgets.kinematics_graphs)
         h_split.setStretchFactor(0, 1)
         h_split.setStretchFactor(1, 1)
+        h_split.setSizes([600, 600])  # equal render and graph on first open
         widgets.horizontalLayout_37.addWidget(h_split)
         # Relax the hard minimum so the handle can actually be dragged left
         widgets.renderWidget.setMinimumWidth(150)
@@ -2630,6 +2846,7 @@ class MainWindow(QMainWindow):
         v_split.addWidget(widgets.kinematics_left_bottom)
         v_split.setStretchFactor(0, 4)  # render+plot area takes most vertical space
         v_split.setStretchFactor(1, 0)  # playbar stays compact
+        v_split.setSizes([700, 100])    # playbar compact on first open
         widgets.verticalLayout_44.addWidget(v_split)
 
     def _setup_emg_splitters(self):
@@ -2651,6 +2868,7 @@ class MainWindow(QMainWindow):
         h_split.addWidget(widgets.data_process_instruction)
         h_split.setStretchFactor(0, 2)  # plots take more horizontal space
         h_split.setStretchFactor(1, 1)  # pipeline panel is narrower
+        h_split.setSizes([700, 300])    # plots 70%, pipeline 30% on first open
         widgets.horizontalLayout_18.addWidget(h_split)
         widgets.data_process_instruction.setMinimumWidth(200)
 
@@ -2664,7 +2882,237 @@ class MainWindow(QMainWindow):
         v_split.addWidget(widgets.data_process_graphic_bottom)
         v_split.setStretchFactor(0, 1)
         v_split.setStretchFactor(1, 1)
+        v_split.setSizes([500, 500])    # equal top and bottom plots on first open
         widgets.verticalLayout_39.addWidget(v_split)
+
+    def _setup_start_page_splitter(self):
+        """Replace the fixed HBoxLayout on the start page with a QSplitter.
+
+        horizontalLayout_7 holds start_left (sidebar), start_middle (guide cards),
+        and start_right (empty) in a plain QHBoxLayout with no drag handle.
+        """
+        h_split = QSplitter(Qt.Orientation.Horizontal)
+        h_split.setHandleWidth(4)
+        h_split.setChildrenCollapsible(False)
+        widgets.horizontalLayout_7.removeWidget(widgets.start_left)
+        widgets.horizontalLayout_7.removeWidget(widgets.start_middle)
+        widgets.horizontalLayout_7.removeWidget(widgets.start_right)
+        h_split.addWidget(widgets.start_left)
+        h_split.addWidget(widgets.start_middle)
+        # start_right is no longer needed — hide it so it takes no space
+        widgets.start_right.hide()
+        h_split.setStretchFactor(0, 3)
+        h_split.setStretchFactor(1, 7)
+        h_split.setSizes([300, 700])
+        widgets.horizontalLayout_7.addWidget(h_split)
+
+    def _setup_emg_page_splitters(self):
+        """Add splitters to the EMG page outer layout and the left body vertical stack.
+
+        horizontalLayout_16 holds emg_left_body (plots + log) and emg_right_body
+        (actions + config table) in a plain QHBoxLayout.
+        verticalLayout_33 holds data_process (processing area) and configuration_list
+        (config log) in a plain QVBoxLayout.
+        Both are replaced here so the user can resize the panes at runtime.
+        """
+        # 1. Horizontal splitter: EMG left body | EMG right body
+        h_split = QSplitter(Qt.Orientation.Horizontal)
+        h_split.setHandleWidth(4)
+        h_split.setChildrenCollapsible(False)
+        widgets.horizontalLayout_16.removeWidget(widgets.emg_left_body)
+        widgets.horizontalLayout_16.removeWidget(widgets.emg_right_body)
+        h_split.addWidget(widgets.emg_left_body)
+        h_split.addWidget(widgets.emg_right_body)
+        # Preserve the original 7:1 proportions from sizePolicy horizontal stretch values
+        h_split.setStretchFactor(0, 7)
+        h_split.setStretchFactor(1, 1)
+        h_split.setSizes([700, 300])    # left body 70%, right body 30% on first open
+        widgets.horizontalLayout_16.addWidget(h_split)
+
+        # 2. Vertical splitter within emg_left_body: processing area | config log
+        v_split = QSplitter(Qt.Orientation.Vertical)
+        v_split.setHandleWidth(4)
+        v_split.setChildrenCollapsible(False)
+        widgets.verticalLayout_33.removeWidget(widgets.data_process)
+        widgets.verticalLayout_33.removeWidget(widgets.configuration_list)
+        v_split.addWidget(widgets.data_process)
+        v_split.addWidget(widgets.configuration_list)
+        v_split.setStretchFactor(0, 7)
+        v_split.setStretchFactor(1, 3)
+        v_split.setSizes([700, 300])    # processing 70%, config log 30% on first open
+        widgets.verticalLayout_33.addWidget(v_split)
+
+        # 3. Vertical splitter within emg_right_body: config table | config file panel
+        rv_split = QSplitter(Qt.Orientation.Vertical)
+        rv_split.setHandleWidth(4)
+        rv_split.setChildrenCollapsible(False)
+        widgets.verticalLayout_34.removeWidget(widgets.frame_23)
+        widgets.verticalLayout_34.removeWidget(widgets.frame_25)
+        rv_split.addWidget(widgets.frame_23)
+        rv_split.addWidget(widgets.frame_25)
+        rv_split.setStretchFactor(0, 7)
+        rv_split.setStretchFactor(1, 3)
+        rv_split.setSizes([700, 300])   # table 70%, config file 30% on first open
+        widgets.verticalLayout_34.addWidget(rv_split)
+
+    def _setup_kinematics_page_splitter(self):
+        """Add a splitter between the kinematics main area and the right label tree.
+
+        horizontalLayout_36 holds kinematics_left (3D view + playbar, already splitter-
+        enabled internally) and kinematics_right (label tree) in a plain QHBoxLayout.
+        """
+        h_split = QSplitter(Qt.Orientation.Horizontal)
+        h_split.setHandleWidth(4)
+        h_split.setChildrenCollapsible(False)
+        widgets.horizontalLayout_36.removeWidget(widgets.kinematics_left)
+        widgets.horizontalLayout_36.removeWidget(widgets.kinematics_right)
+        h_split.addWidget(widgets.kinematics_left)
+        h_split.addWidget(widgets.kinematics_right)
+        # Preserve the original 8:2 proportions from sizePolicy horizontal stretch values
+        h_split.setStretchFactor(0, 8)
+        h_split.setStretchFactor(1, 2)
+        h_split.setSizes([800, 200])    # main area 80%, label tree 20% on first open
+        widgets.horizontalLayout_36.addWidget(h_split)
+
+    def _setup_frequency_page_splitters(self):
+        """Add splitters to the frequency domain page.
+
+        horizontalLayout_40 holds frequency_left (plots + controls) and frequency_right
+        (participants tree) in a plain QHBoxLayout.
+        verticalLayout_20 holds frequency_top (time-domain view) and frequency_bottom
+        (frequency plots + page controls) in a plain QVBoxLayout.
+        """
+        # 1. Horizontal splitter: frequency left area | participants tree
+        h_split = QSplitter(Qt.Orientation.Horizontal)
+        h_split.setHandleWidth(4)
+        h_split.setChildrenCollapsible(False)
+        widgets.horizontalLayout_40.removeWidget(widgets.frequency_left)
+        widgets.horizontalLayout_40.removeWidget(widgets.frequency_right)
+        h_split.addWidget(widgets.frequency_left)
+        h_split.addWidget(widgets.frequency_right)
+        # Preserve the original 8:2 proportions
+        h_split.setStretchFactor(0, 8)
+        h_split.setStretchFactor(1, 2)
+        h_split.setSizes([800, 200])    # left area 80%, participants tree 20% on first open
+        widgets.horizontalLayout_40.addWidget(h_split)
+
+        # 2. Vertical splitter: time-domain view | frequency plots + controls
+        v_split = QSplitter(Qt.Orientation.Vertical)
+        v_split.setHandleWidth(4)
+        v_split.setChildrenCollapsible(False)
+        widgets.verticalLayout_20.removeWidget(widgets.frequency_top)
+        widgets.verticalLayout_20.removeWidget(widgets.frequency_bottom)
+        v_split.addWidget(widgets.frequency_top)
+        v_split.addWidget(widgets.frequency_bottom)
+        v_split.setStretchFactor(0, 2)
+        v_split.setStretchFactor(1, 4)
+        v_split.setSizes([400, 400])    # equal top and bottom on first open
+        widgets.verticalLayout_20.addWidget(v_split)
+
+    def _replace_start_middle_with_logo(self):
+        """Replace the guide-card scroll area with the full-width branding logo."""
+        from PySide6.QtGui import QPixmap as _QPixmap
+
+        logo_path = os.path.join(os.path.dirname(__file__), "myotion_resources", "fulllogo_transparent.png")
+        pix = _QPixmap(logo_path)
+
+        # Clear all widgets from the layout (removes scrollArea_2 + guide cards)
+        layout = widgets.start_middle.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        # Neutral background so the transparent logo reads cleanly
+        widgets.start_middle.setStyleSheet("background-color: #f4f4f4; border: none;")
+
+        # ScaledImageLabel scales to fill the panel while keeping the logo's aspect ratio
+        logo_label = ScaledImageLabel(pix)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.addWidget(logo_label)
+
+    def _generate_custom_icons(self):
+        """Draw and cache custom nav icons; apply them to the relevant buttons.
+
+        Icons are 20×20 white-on-transparent PNGs created with QPainter so no
+        external image files are needed.  They are regenerated on every start so
+        any future tweaks to the drawing code take effect immediately.
+        """
+        import math
+        from PySide6.QtGui import (
+            QPixmap, QPainter, QPen, QColor, QBrush, QPainterPath,
+        )
+        from PySide6.QtCore import Qt, QRectF, QPointF
+
+        icons_dir = os.path.join(os.path.dirname(__file__), "myotion_resources", "icons")
+        os.makedirs(icons_dir, exist_ok=True)
+
+        W, H = 20, 20
+        WHITE = QColor(255, 255, 255)
+
+        # ── Stick figure (Kinematics Inspection) ──────────────────────────────
+        pix = QPixmap(W, H)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(WHITE)
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+
+        # Head — filled circle
+        p.setBrush(QBrush(WHITE))
+        p.drawEllipse(QRectF(7, 0, 6, 6))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Body
+        p.drawLine(QPointF(10, 6), QPointF(10, 13))
+        # Arms
+        p.drawLine(QPointF(10, 8), QPointF(4,  12))
+        p.drawLine(QPointF(10, 8), QPointF(16, 12))
+        # Legs
+        p.drawLine(QPointF(10, 13), QPointF(5,  20))
+        p.drawLine(QPointF(10, 13), QPointF(15, 20))
+        p.end()
+
+        stick_path = os.path.join(icons_dir, "stick_figure.png")
+        pix.save(stick_path, "PNG")
+
+        # ── EMG action-potential wave (EMG Time Domain) ────────────────────────
+        pix = QPixmap(W, H)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(WHITE)
+        pen.setWidthF(1.8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+
+        # Baseline → dip down → spike up → baseline  (action-potential shape)
+        path = QPainterPath()
+        path.moveTo(0, 10)
+        path.lineTo(4, 10)                          # flat left
+        path.cubicTo(5, 10,  6, 17,  7.5, 17)      # dip down
+        path.cubicTo(9, 17,  10, 2,  12, 2)         # spike up
+        path.cubicTo(13, 2,  14, 10, 15, 10)        # return to baseline
+        path.lineTo(20, 10)                          # flat right
+        p.drawPath(path)
+        p.end()
+
+        wave_path = os.path.join(icons_dir, "emg_wave.png")
+        pix.save(wave_path, "PNG")
+
+        # ── Apply to buttons via CSS file URL ─────────────────────────────────
+        def _css_url(fp):
+            return fp.replace("\\", "/")
+
+        widgets.btn_kinematic.setStyleSheet(
+            f"background-image: url({_css_url(stick_path)});"
+        )
+        widgets.btn_emg.setStyleSheet(
+            f"background-image: url({_css_url(wave_path)});"
+        )
 
     def preloadKinematicPage(self):
         ps = self.workspace.getParticipants()
@@ -2912,6 +3360,9 @@ class MainWindow(QMainWindow):
         )
         self._crop_status_label.setStyleSheet("color: #2a9d8f; font-size: 10px;")
         logger.info("EMG manual crop: {:.3f}s → {:.3f}s".format(t_start, t_end))
+        # Re-render the plots zoomed to the selected segment
+        self.__updateEMGRenderBuffer()
+        self.updateEMGSignalProcessPanel()
 
     def _onCropClear(self):
         p, _, _ = self.singleEMG
@@ -2920,6 +3371,9 @@ class MainWindow(QMainWindow):
         self.workspace[p].crop_interval = None
         self._sync_crop_widget(p)
         logger.info("EMG manual crop cleared for {}".format(p.name))
+        # Re-render the plots showing the full trial again
+        self.__updateEMGRenderBuffer()
+        self.updateEMGSignalProcessPanel()
 
 
     def closeEvent(self, event):  # Window close event handler.

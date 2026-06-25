@@ -58,6 +58,43 @@ URL_SCHEME = "local"
 X_LABEL = "Time(s)"
 Y_LABEL = "Magnitude"
 
+# Injected into every plot HTML: adds a small "Grid" toggle button to the Plotly modebar
+_GRID_TOGGLE_JS = """
+<script>
+(function() {
+    function addGridButton() {
+        var gds = document.querySelectorAll('.js-plotly-plot');
+        if (!gds.length) { setTimeout(addGridButton, 250); return; }
+        var allReady = true;
+        gds.forEach(function(gd) {
+            if (gd._myGridBtn) return;
+            var modebar = gd.querySelector('.modebar-group');
+            if (!modebar) { allReady = false; return; }
+            var btn = document.createElement('a');
+            btn.className = 'modebar-btn';
+            btn.title = 'Toggle Grid';
+            btn.style.cssText = 'cursor:pointer;font-size:13px;padding:2px 5px;opacity:0.4;';
+            btn.textContent = '⋮⋯';
+            btn._on = false;
+            btn.addEventListener('click', function(e) {
+                e.preventDefault();
+                btn._on = !btn._on;
+                btn.style.opacity = btn._on ? '1' : '0.4';
+                Plotly.relayout(gd, {
+                    'xaxis.showgrid': btn._on,
+                    'yaxis.showgrid': btn._on
+                });
+            });
+            modebar.insertBefore(btn, modebar.firstChild);
+            gd._myGridBtn = btn;
+        });
+        if (!allReady) setTimeout(addGridButton, 250);
+    }
+    window.addEventListener('load', function() { setTimeout(addGridButton, 300); });
+})();
+</script>
+"""
+
 
 # html load handler with custom scheme
 class UrlSchemeHandler(QWebEngineUrlSchemeHandler):
@@ -103,14 +140,19 @@ class QPlotView(QWebEngineView):
         self.setUrl(self.url)
 
     # style setting
-    def update_layout(self, y_label=Y_LABEL):
-        # set label to be on the bottom of the fig
+    def update_layout(self, y_label=Y_LABEL, xrange=None):
         self.fig.update_layout(
             legend=dict(
-                yanchor="bottom", xanchor="center", y=-0.5, x=0.95, orientation="h"
+                yanchor="bottom", xanchor="center", y=-0.5, x=0.95,
+                orientation="h", title="channel",
             )
         )
         self.fig.update_layout(yaxis_title=y_label)
+        # No grid by default; user can toggle via the injected button
+        self.fig.update_xaxes(showgrid=False)
+        self.fig.update_yaxes(showgrid=False)
+        if xrange is not None:
+            self.fig.update_layout(xaxis_range=xrange)
 
     # bar, plot by timeSeriesTable
     def bar(self, tst, channel, title="", xlabel=X_LABEL, ylabel=Y_LABEL, color=[]):
@@ -184,7 +226,7 @@ class QPlotView(QWebEngineView):
         return 0
 
     # line, plot by list
-    def line(self, x_, y_, channel, title="", xlabel=X_LABEL, ylabel=Y_LABEL, color=[]):
+    def line(self, x_, y_, channel, title="", xlabel=X_LABEL, ylabel=Y_LABEL, color=[], xrange=None):
         chans = []
         data = []
         # type and sanity check
@@ -213,14 +255,17 @@ class QPlotView(QWebEngineView):
         df[xlabel] = x_
         df = df[:PLOTY_MAX_POINTS]
         self.fig = px.line(
-            df, x=xlabel, y=chans, title=title, markers=False, render_mode="webgl"
+            df, x=xlabel, y=chans, title=title, markers=False, render_mode="webgl",
+            color_discrete_sequence=color if color else None,
         )
-        self.update_layout(ylabel)
+        self.update_layout(ylabel, xrange=xrange)
         return 0
 
     # display on webEngine
     def show(self):
         html = plotly.io.to_html(self.fig, include_plotlyjs=True)
+        # Inject grid-toggle button into the Plotly modebar
+        html = html.replace("</body>", _GRID_TOGGLE_JS + "</body>")
         self.schemeHandler.setHtml(html)
 
         self.setUrl(self.url)

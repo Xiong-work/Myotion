@@ -56,12 +56,12 @@ class emgConfigInfo:
         emgConfigEnum.SUMMARY,
     ]
     nameMap = {
-        emgConfigEnum.DC_OFFSET: "remove_dc_offset",
-        emgConfigEnum.FILTER: "filter",
-        emgConfigEnum.FULL_W_RECT: "full_wave_rectification",
-        emgConfigEnum.NORMALIZATION: "normalization",
-        emgConfigEnum.ACTIVATION: "activation",
-        emgConfigEnum.SUMMARY: "summary",
+        emgConfigEnum.DC_OFFSET: "Remove DC Offset",
+        emgConfigEnum.FILTER: "Filter",
+        emgConfigEnum.FULL_W_RECT: "Full-Wave Rectification",
+        emgConfigEnum.NORMALIZATION: "Normalization",
+        emgConfigEnum.ACTIVATION: "Activation",
+        emgConfigEnum.SUMMARY: "Summary",
     }
 
 
@@ -358,7 +358,16 @@ class emgConfigure:
         return type_id, emgConfigInfo.nameMap[type_id]
 
     def getStepStringList(self):
-        return [emgConfigInfo.nameMap[s.id] for s in self.stepConfig]
+        result = []
+        for s in self.stepConfig:
+            if s.id == emgConfigEnum.FILTER:
+                if hasattr(s, "type") and int(s.type) == int(emgFilterEnum.LOW_PASS):
+                    result.append("Low-pass Filter")
+                else:
+                    result.append("Band-pass Filter")
+            else:
+                result.append(emgConfigInfo.nameMap[s.id])
+        return result
 
     def size(self):
         return len(self.stepConfig)

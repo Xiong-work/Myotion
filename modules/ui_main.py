@@ -720,7 +720,7 @@ class Ui_MainWindow(object):
         self.btn_emg.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_emg.setLayoutDirection(Qt.LeftToRight)
         self.btn_emg.setStyleSheet(
-            "background-image: url(:/icons/images/icons/cil-folder.png);"
+            "background-image: url(:/icons/images/icons/cil-chart-line.png);"
         )
 
         self.verticalLayout_8.addWidget(self.btn_emg)
@@ -736,7 +736,7 @@ class Ui_MainWindow(object):
         self.btn_kinematic.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_kinematic.setLayoutDirection(Qt.LeftToRight)
         self.btn_kinematic.setStyleSheet(
-            "background-image: url(:/icons/images/icons/cil-people.png);"
+            "background-image: url(:/icons/images/icons/cil-3d.png);"
         )
 
         self.verticalLayout_8.addWidget(self.btn_kinematic)
@@ -752,7 +752,7 @@ class Ui_MainWindow(object):
         self.btn_frequency.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_frequency.setLayoutDirection(Qt.LeftToRight)
         self.btn_frequency.setStyleSheet(
-            "background-image: url(:/icons/images/icons/cil-layers.png);"
+            "background-image: url(:/icons/images/icons/cil-equalizer.png);"
         )
 
         self.verticalLayout_8.addWidget(self.btn_frequency)
@@ -1007,7 +1007,11 @@ class Ui_MainWindow(object):
 
         self.treeView = QTreeView(self.workspace_tree)
         self.treeView.setObjectName("treeView")
-        self.treeView.setStyleSheet("font-size:14px;\n" "color: rgba(0,0,0,0.8);\n" "")
+        self.treeView.setStyleSheet(
+            "font-size:14px;\n"
+            "color: rgba(255,255,255,0.85);\n"
+            "background-color: #3a405c;\n"
+        )
 
         self.verticalLayout_79.addWidget(self.treeView)
 
@@ -1121,6 +1125,11 @@ class Ui_MainWindow(object):
 
         self.listWidget_3 = QListWidget(self.paticipant_list)
         self.listWidget_3.setObjectName("listWidget_3")
+        self.listWidget_3.setStyleSheet(
+            "background-color: #3a405c;\n"
+            "color: rgba(255,255,255,0.8);\n"
+            "border: none;\n"
+        )
 
         self.verticalLayout_65.addWidget(self.listWidget_3)
 
@@ -1936,7 +1945,7 @@ class Ui_MainWindow(object):
         self.label_11.setStyleSheet(
             "font-weight: bold;\n"
             "font-size:12px;\n"
-            "color: rgba(0,0,0,0.8);\n"
+            "color: rgba(255,255,255,0.85);\n"
             "margin-left: 4px;\n"
             "border: none;"
         )
@@ -2018,7 +2027,7 @@ class Ui_MainWindow(object):
         self.label_12.setStyleSheet(
             "font-weight: bold;\n"
             "font-size:12px;\n"
-            "color: rgba(0,0,0,0.8);\n"
+            "color: rgba(255,255,255,0.85);\n"
             "margin-left: 4px;\n"
             "border: none;"
         )
@@ -2073,7 +2082,7 @@ class Ui_MainWindow(object):
         self.toolBox.setObjectName("toolBox")
         self.toolBox.setCursor(QCursor(Qt.PointingHandCursor))
         self.toolBox.setStyleSheet(
-            "color: rgba(0,0,0,0.6);\n" "border:none;\n" "font-weight:bold;"
+            "color: rgba(255,255,255,0.75);\n" "border:none;\n" "font-weight:bold;"
         )
         self.toolBox.setFrameShape(QFrame.Box)
         self.toolBox.setFrameShadow(QFrame.Raised)
@@ -3337,7 +3346,7 @@ class Ui_MainWindow(object):
         self.frame_25.setObjectName("frame_25")
         sizePolicy14.setHeightForWidth(self.frame_25.sizePolicy().hasHeightForWidth())
         self.frame_25.setSizePolicy(sizePolicy14)
-        self.frame_25.setStyleSheet("background-color:#f4f4f4;\n" "border: none;\n" "")
+        self.frame_25.setStyleSheet("background-color:#21242b;\n" "border: none;\n" "")
         self.frame_25.setFrameShape(QFrame.StyledPanel)
         self.frame_25.setFrameShadow(QFrame.Raised)
         self.verticalLayout_57 = QVBoxLayout(self.frame_25)
@@ -3362,7 +3371,7 @@ class Ui_MainWindow(object):
         self.label_21.setStyleSheet(
             "font-weight: bold;\n"
             "font-size:12px;\n"
-            "color: rgba(0,0,0,0.8);\n"
+            "color: rgba(255,255,255,0.85);\n"
             "margin-left: 4px;\n"
             "border: none;"
         )
@@ -3388,7 +3397,7 @@ class Ui_MainWindow(object):
         self.pushButton_15.setObjectName("pushButton_15")
         self.pushButton_15.setCursor(QCursor(Qt.PointingHandCursor))
         self.pushButton_15.setStyleSheet(
-            "background-color:rgba(0,0,0,0.8);\n" "margin:3px 2px;"
+            "background-color:rgba(255,255,255,0.15);\n" "margin:3px 2px;"
         )
         self.pushButton_15.setIcon(icon1)
 
@@ -3405,7 +3414,7 @@ class Ui_MainWindow(object):
         )
         self.listWidget_2.setSizePolicy(sizePolicy12)
         self.listWidget_2.setStyleSheet(
-            "font-size:11px;\n" "color:rgba(0,0,0,0.5);\n" ""
+            "font-size:11px;\n" "color:rgba(255,255,255,0.7);\n" ""
         )
 
         self.verticalLayout_57.addWidget(self.listWidget_2)
@@ -3496,7 +3505,7 @@ class Ui_MainWindow(object):
 
         self.label_current_process = QLabel()
         self.label_current_process.setAlignment(Qt.AlignCenter)
-        self.label_current_process.setText("Current Process")
+        self.label_current_process.setText("Plot")
         self.label_current_process.setObjectName("label_11")
         self.label_current_process.setStyleSheet(
             "font-weight: bold;\n"
@@ -3989,7 +3998,7 @@ class Ui_MainWindow(object):
             self.frequency_top.sizePolicy().hasHeightForWidth()
         )
         self.frequency_top.setSizePolicy(sizePolicy19)
-        self.frequency_top.setStyleSheet("background-color:#f4f4f4;\n" "border:none;")
+        self.frequency_top.setStyleSheet("background-color:#21242b;\n" "border:none;")
         self.frequency_top.setFrameShape(QFrame.StyledPanel)
         self.frequency_top.setFrameShadow(QFrame.Raised)
 
@@ -4058,14 +4067,14 @@ class Ui_MainWindow(object):
         self.horizontalLayout_42.setContentsMargins(0, 0, 0, 0)
         self.label_13 = QLabel(self.frame_61)
         self.label_13.setObjectName("label_13")
-        self.label_13.setStyleSheet("color:rgba(0,0,0,0.8);\n" "font-weight:bold;")
+        self.label_13.setStyleSheet("color:rgba(255,255,255,0.7);\n" "font-weight:bold;")
 
         self.horizontalLayout_42.addWidget(self.label_13)
 
         self.label_14 = QLabel(self.frame_61)
         self.label_14.setObjectName("label_14")
         self.label_14.setStyleSheet(
-            "font-weight: bold;\n" "font-size:14px;color:rgba(0,0,0,0.4);"
+            "font-weight: bold;\n" "font-size:14px;color:rgba(255,255,255,0.6);"
         )
 
         self.horizontalLayout_42.addWidget(self.label_14)
@@ -4074,8 +4083,9 @@ class Ui_MainWindow(object):
         self.lineEdit_5.setObjectName("lineEdit_5")
         self.lineEdit_5.setMinimumSize(QSize(0, 30))
         self.lineEdit_5.setStyleSheet(
-            "background-color: rgb(255, 255, 255);\n"
-            "color:rgba(0,0,0,0.4);font-weight:bold;"
+            "background-color: rgb(44, 49, 60);\n"
+            "color:rgba(255,255,255,0.85);font-weight:bold;\n"
+            "border:1px solid rgba(255,255,255,0.2);border-radius:4px;"
         )
 
         self.horizontalLayout_42.addWidget(self.lineEdit_5)
@@ -4094,14 +4104,14 @@ class Ui_MainWindow(object):
         self.horizontalLayout_41.setContentsMargins(0, 0, 0, 0)
         self.label = QLabel(self.frame_60)
         self.label.setObjectName("label")
-        self.label.setStyleSheet("color:rgba(0,0,0,0.8);\n" "font-weight:bold;")
+        self.label.setStyleSheet("color:rgba(255,255,255,0.7);\n" "font-weight:bold;")
 
         self.horizontalLayout_41.addWidget(self.label)
 
         self.label_15 = QLabel(self.frame_60)
         self.label_15.setObjectName("label_15")
         self.label_15.setStyleSheet(
-            "font-weight: bold;\n" "font-size:14px;color:rgba(0,0,0,0.4);"
+            "font-weight: bold;\n" "font-size:14px;color:rgba(255,255,255,0.7);"
         )
 
         self.horizontalLayout_41.addWidget(self.label_15)
@@ -4110,9 +4120,9 @@ class Ui_MainWindow(object):
         self.lineEdit_4.setObjectName("lineEdit_4")
         self.lineEdit_4.setMinimumSize(QSize(0, 30))
         self.lineEdit_4.setStyleSheet(
-            "background-color: rgb(255, 255, 255);\n"
-            "color:rgba(0,0,0,0.4);font-weight:bold;\n"
-            "border:none;"
+            "background-color: rgb(44, 49, 60);\n"
+            "color:rgba(255,255,255,0.85);font-weight:bold;\n"
+            "border:1px solid rgba(255,255,255,0.2);border-radius:4px;"
         )
 
         self.horizontalLayout_41.addWidget(self.lineEdit_4)
@@ -4133,7 +4143,7 @@ class Ui_MainWindow(object):
         self.label_40 = QLabel(self.frame_62)
         self.label_40.setObjectName("label_40")
         self.label_40.setStyleSheet(
-            "font-weight: bold;\n" "font-size:14px;color:rgba(0,0,0,0.4);"
+            "font-weight: bold;\n" "font-size:14px;color:rgba(255,255,255,0.7);"
         )
 
         self.horizontalLayout_48.addWidget(self.label_40)
@@ -4142,9 +4152,9 @@ class Ui_MainWindow(object):
         self.lineEdit_6.setObjectName("lineEdit_6")
         self.lineEdit_6.setMinimumSize(QSize(0, 30))
         self.lineEdit_6.setStyleSheet(
-            "background-color: rgb(255, 255, 255);\n"
-            "color:rgba(0,0,0,0.4);font-weight:bold;\n"
-            "border:none;"
+            "background-color: rgb(44, 49, 60);\n"
+            "color:rgba(255,255,255,0.85);font-weight:bold;\n"
+            "border:1px solid rgba(255,255,255,0.2);border-radius:4px;"
         )
 
         self.horizontalLayout_48.addWidget(self.lineEdit_6)
@@ -4194,7 +4204,7 @@ class Ui_MainWindow(object):
         )
         self.frequency_bottom.setSizePolicy(sizePolicy20)
         self.frequency_bottom.setStyleSheet(
-            "background-color:#f4f4f4;\n" "border:none;"
+            "background-color:#21242b;\n" "border:none;"
         )
         self.frequency_bottom.setFrameShape(QFrame.StyledPanel)
         self.frequency_bottom.setFrameShadow(QFrame.Raised)
@@ -4250,7 +4260,7 @@ class Ui_MainWindow(object):
         self.label_16 = QLabel(self.frame_63)
         self.label_16.setObjectName("label_16")
         self.label_16.setStyleSheet(
-            "font-weight: bold;\n" "font-size:14px;color:rgba(0,0,0,0.4);"
+            "font-weight: bold;\n" "font-size:14px;color:rgba(255,255,255,0.7);"
         )
 
         self.horizontalLayout_45.addWidget(self.label_16)
@@ -4264,10 +4274,10 @@ class Ui_MainWindow(object):
         self.comboBox_19.setObjectName("comboBox_19")
         self.comboBox_19.setAutoFillBackground(False)
         self.comboBox_19.setStyleSheet(
-            "background-color: rgb(255, 255, 255);\n"
+            "background-color: rgb(33, 37, 43);\n"
             "margin:0px 10px;\n"
             "font-weight: bold;\n"
-            "font-size:14px;color:rgba(0,0,0,1);"
+            "font-size:14px;color:rgba(255,255,255,0.85);"
         )
 
         self.horizontalLayout_45.addWidget(self.comboBox_19)
@@ -4278,7 +4288,7 @@ class Ui_MainWindow(object):
         self.pushButton_28.setMaximumSize(QSize(30, 30))
         self.pushButton_28.setCursor(QCursor(Qt.PointingHandCursor))
         self.pushButton_28.setStyleSheet(
-            "background-color:rgba(0,0,0,0.8);\n" "margin:3px 2px;"
+            "background-color:rgba(255,255,255,0.15);\n" "margin:3px 2px;"
         )
         self.pushButton_28.setIcon(icon1)
 
@@ -4287,7 +4297,7 @@ class Ui_MainWindow(object):
         self.label_50 = QLabel(self.frame_63)
         self.label_50.setObjectName("label_50")
         self.label_50.setStyleSheet(
-            "font-weight: bold;\n" "font-size:14px;color:rgba(0,0,0,0.4);"
+            "font-weight: bold;\n" "font-size:14px;color:rgba(255,255,255,0.7);"
         )
 
         self.horizontalLayout_45.addWidget(self.label_50)
@@ -4297,10 +4307,10 @@ class Ui_MainWindow(object):
         self.comboBox_20.setObjectName("comboBox_20")
         self.comboBox_20.setAutoFillBackground(False)
         self.comboBox_20.setStyleSheet(
-            "background-color: rgb(255, 255, 255);\n"
+            "background-color: rgb(33, 37, 43);\n"
             "margin:0px 10px;\n"
             "font-weight: bold;\n"
-            "font-size:14px;color:rgba(0,0,0,1);"
+            "font-size:14px;color:rgba(255,255,255,0.85);"
         )
 
         self.horizontalLayout_45.addWidget(self.comboBox_20)
@@ -4311,7 +4321,7 @@ class Ui_MainWindow(object):
         self.pushButton_30.setMaximumSize(QSize(30, 30))
         self.pushButton_30.setCursor(QCursor(Qt.PointingHandCursor))
         self.pushButton_30.setStyleSheet(
-            "background-color:rgba(0,0,0,0.8);\n" "margin:3px 2px;\n" ""
+            "background-color:rgba(255,255,255,0.15);\n" "margin:3px 2px;\n" ""
         )
         self.pushButton_30.setIcon(icon2)
 
@@ -4351,7 +4361,7 @@ class Ui_MainWindow(object):
             self.frequency_right.sizePolicy().hasHeightForWidth()
         )
         self.frequency_right.setSizePolicy(sizePolicy9)
-        self.frequency_right.setStyleSheet("background-color:#f4f4f4;")
+        self.frequency_right.setStyleSheet("background-color:#21242b;")
         self.frequency_right.setFrameShape(QFrame.StyledPanel)
         self.frequency_right.setFrameShadow(QFrame.Raised)
 
@@ -4528,19 +4538,19 @@ class Ui_MainWindow(object):
         )
         self.toggleButton.setText("")
         self.btn_start.setText(
-            QCoreApplication.translate("MainWindow", "Quick Start", None)
+            QCoreApplication.translate("MainWindow", "Home", None)
         )
         self.btn_emg.setText(
-            QCoreApplication.translate("MainWindow", "EMG Data Analysis", None)
+            QCoreApplication.translate("MainWindow", "EMG Time Domain", None)
         )
         self.btn_kinematic.setText(
-            QCoreApplication.translate("MainWindow", "Kinematic Data Analysis", None)
+            QCoreApplication.translate("MainWindow", "Kinematics Inspection", None)
         )
         self.btn_frequency.setText(
-            QCoreApplication.translate("MainWindow", "Frequency Domain Analysis", None)
+            QCoreApplication.translate("MainWindow", "EMG Frequency Domain", None)
         )
         self.btn_advanced.setText(
-            QCoreApplication.translate("MainWindow", "Advanced Signal Analysis", None)
+            QCoreApplication.translate("MainWindow", "Advanced EMG Analysis", None)
         )
         self.btn_stats.setText(
             QCoreApplication.translate("MainWindow", "Statistical Analysis", None)
@@ -4614,8 +4624,8 @@ class Ui_MainWindow(object):
         # endif // QT_CONFIG(tooltip)
         self.closeAppBtn.setText("")
         
-        self.title_label.setText(QCoreApplication.translate("MainWindow", u"Let's get started", None))
-        self.subtitle_label.setText(QCoreApplication.translate("MainWindow", u"Welcome to MSK workplace, sign in to start using.", None))
+        self.title_label.setText(QCoreApplication.translate("MainWindow", u"Welcome to Myotion", None))
+        self.subtitle_label.setText(QCoreApplication.translate("MainWindow", u"Open-source tools for EMG processing — built for YOU.", None))
         self.signInButton.setText(QCoreApplication.translate("MainWindow", u"Sign In", None))
         self.signUpButton.setText(QCoreApplication.translate("MainWindow", u"Sign Up", None))
         # self.logoutButton.setText(QCoreApplication.translate("MainWindow", u"Log Out", None))
@@ -4638,7 +4648,7 @@ class Ui_MainWindow(object):
         self.label_11.setText(QCoreApplication.translate("MainWindow", u"Previous Process", None))
 
         self.label_12.setText(
-            QCoreApplication.translate("MainWindow", "Current Process", None)
+            QCoreApplication.translate("MainWindow", "Plot", None)
         )
         self.checkBox_4.setText(
             QCoreApplication.translate("MainWindow", "Skip", None)

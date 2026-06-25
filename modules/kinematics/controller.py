@@ -138,9 +138,9 @@ class Controller:
                 xs = self._apply_filter(xs, fs, cutoff_hz=6.0, order=2)
                 ys = self._apply_filter(ys, fs, cutoff_hz=6.0, order=2)
                 zs = self._apply_filter(zs, fs, cutoff_hz=6.0, order=2)
-            self.top.add_line(np.arange(0, len(xs)), xs, name + ".x")
-            self.top.add_line(np.arange(0, len(ys)), ys, name + ".y")
-            self.top.add_line(np.arange(0, len(zs)), zs, name + ".z")
+            self.top.add_line(np.arange(0, len(xs)), xs, name + ".x", type="marker")
+            self.top.add_line(np.arange(0, len(ys)), ys, name + ".y", type="marker")
+            self.top.add_line(np.arange(0, len(zs)), zs, name + ".z", type="marker")
         if name in self.model.emg.Channels:
             # EMG data has its own processing pipeline — no additional filtering here
             x = self.model.emg.getLinspace()
