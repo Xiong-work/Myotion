@@ -24,40 +24,34 @@ class State(Enum):
 
 
 buttonStyle = """
-            QPushButton:hover{
-                background: qlineargradient(x1 : 0, y1 : 0, x2 : 0, y2 : 1,
-                stop :   0.0 #343b48,
-                stop :   0.5 #59667c,
-                stop :   0.55 #59667c,
-                stop :   1.0 #7585a2);
-            }
-            QPushButton {
-                border: 1px solid #343b48;
-                border-radius: 2px;
-                padding: 5px 10px 2px 5px;
-                color: #fff;
-                font: bold large \"Arial\";
-                height: 25px;
-                width: 80px;
-            }
-            QPushButton:pressed { background: qlineargradient(x1 : 0, y1 : 0, x2 : 0, y2 : 1,
-                stop :   0.0 #424b5b,
-                stop :   0.5 #64718a,
-                stop :   0.55 #99abca,
-                stop :   1.0 #9dafcf);
-                padding-top: 6px;
-                padding-left: 10px;
-            }
-            QPushButton:on { 
-                background: #545f74
-            }
-            QPushButton:disabled {
-                background: transparent #e5e9ee;
-                padding-top: 2px;
-                padding-left: 3px;
-                color: black;
-            }
-        """
+    QPushButton {
+        background-color: #343b48;
+        border: 1px solid #495474;
+        border-radius: 5px;
+        padding: 5px 12px;
+        color: #ddd;
+        font: 10pt "Segoe UI";
+        height: 25px;
+        min-width: 60px;
+    }
+    QPushButton:hover {
+        background-color: #495474;
+        border: 1px solid #bd93f9;
+    }
+    QPushButton:pressed {
+        background-color: #566388;
+        padding-top: 6px;
+    }
+    QPushButton:on {
+        background-color: #566388;
+        border: 1px solid #bd93f9;
+    }
+    QPushButton:disabled {
+        background-color: #2c3039;
+        color: #666;
+        border: 1px solid #444;
+    }
+"""
 
 
 class SliderWidget(QSlider):
@@ -77,58 +71,44 @@ class SliderWidget(QSlider):
                 padding-right: 10px;
                 padding-bottom: 20px;
             }
-             QSlider::groove:horizontal {
-                border: 1px solid #bbb;
-                background: white;
-                height: 15px;
-                border-radius: 8px;
+            QSlider::groove:horizontal {
+                background: #343b48;
+                height: 10px;
+                border-radius: 5px;
             }
             QSlider::sub-page:horizontal {
-     			background: qlineargradient(x1: 0, y1: 0,    x2: 0, y2: 1,
-                stop: 0 #fb6c05, stop: 1 #ea995a);
                 background: qlineargradient(x1: 0, y1: 0.2, x2: 1, y2: 1,
-                stop: 0 #ea995a, stop: 1 #fb6c05);
-                border: 1px solid #777;
-                height: 15px;
-                border-radius: 8px;
-				border-top-right-radius:1px;
-				border-bottom-right-radius:1px;
+                    stop: 0 #ea995a, stop: 1 #fb6c05);
+                height: 10px;
+                border-radius: 5px;
             }
             QSlider::add-page:horizontal {
-                background: #fff;
-                border: 1px solid #777;
-                height: 15px;
-                border-radius: 8px;
-				 border-top-left-radius:1px;
-				border-bottom-left-radius:1px;
+                background: #343b48;
+                height: 10px;
+                border-radius: 5px;
             }
             QSlider::handle:horizontal {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 #eee, stop:1 #ccc);
-                border: 1px solid #777;
-                width: 15px;
+                background: #ddd;
+                border: 1px solid #888;
+                width: 14px;
+                height: 14px;
                 margin-top: -2px;
                 margin-bottom: -2px;
-                border-radius: 8px;
+                border-radius: 7px;
             }
             QSlider::handle:horizontal:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 #fff, stop:1 #ddd);
-                border: 1px solid #444;
-                border-radius: 8px;
+                background: #fff;
+                border: 1px solid #bd93f9;
             }
             QSlider::sub-page:horizontal:disabled {
-                background: #bbb;
-                border-color: #999;
+                background: #444;
             }
             QSlider::add-page:horizontal:disabled {
-                background: #eee;
-                border-color: #999;
+                background: #2c3039;
             }
             QSlider::handle:horizontal:disabled {
-                background: #eee;
-                border: 1px solid #aaa;
-                border-radius: 4px;
+                background: #555;
+                border: 1px solid #444;
             }
             """
         )
@@ -226,9 +206,11 @@ class PlayBarWidget(QWidget):
     def initui(self, parent=None):
         vboxlayout = QVBoxLayout()
         self.setLayout(vboxlayout)
+        self.setStyleSheet("background-color: #2c3039; color: #ddd;")
         self.slider = SliderWidget(parent)
         self.current_frame_label = QLabel(self.tr("Current Frame:"), parent)
         self.current_frame_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.current_frame_label.setStyleSheet("color: #aaa; font-size: 9pt;")
         self.slider.valueChanged.connect(
             lambda x: self.current_frame_label.setText(self.tr("Current Frame: ") + str(x))
         )
@@ -253,6 +235,11 @@ class PlayBarWidget(QWidget):
 
         self.step = QComboBox(self.button_group)
         self.step.addItems([self.tr("Increment"), "5", "10", "20", "50", "100"])
+        self.step.setStyleSheet(
+            "QComboBox { background-color: #333b46; color: #f4f4f4;"
+            " border-radius: 4px; border: 1px solid #495474; padding: 4px 8px; }"
+            "QComboBox:hover { border: 1px solid #bd93f9; }"
+        )
 
         self.markEventButton = QPushButton(self.tr("Mark Event"), self.button_group)
         self.markEventButton.setStyleSheet(buttonStyle)
@@ -260,6 +247,7 @@ class PlayBarWidget(QWidget):
 
         self.filterCheck = QCheckBox(self.tr("Filter"), self.button_group)
         self.filterCheck.setChecked(True)  # filtering on by default
+        self.filterCheck.setStyleSheet("color: #c8c8c8;")
 
         hboxlayout = QHBoxLayout(self.button_group)
         hboxlayout.addStretch()

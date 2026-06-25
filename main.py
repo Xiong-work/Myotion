@@ -665,7 +665,10 @@ class ConfigWindow(QDialog):
         self.ui.setupUi(self)
 
         self.resize(width, height)
+        self.setMinimumSize(640, 480)
         self.setWindowTitle("Configuration")
+        self.setWindowFlag(Qt.WindowMaximizeButtonHint)
+        self.setSizeGripEnabled(True)
 
         self.widgets = self.ui
         self.person = None
@@ -688,6 +691,10 @@ class EMGConfigWindow(QDialog):
         QDialog.__init__(self, parent)
         self.ui = Ui_EMGConfigWindow()
         self.ui.setupUi(self)
+
+        self.setMinimumSize(300, 440)
+        self.setWindowFlag(Qt.WindowMaximizeButtonHint)
+        self.setSizeGripEnabled(True)
 
         self.widgets = self.ui
 
