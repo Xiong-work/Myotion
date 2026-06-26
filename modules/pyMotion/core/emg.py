@@ -126,8 +126,8 @@ class emgNormalization:
     id = emgConfigEnum.NORMALIZATION
 
     def __init__(self):
-        self.enable = True
-        self.norm_type = emgNormTypeEnum.MVC  # default: MVC (backward compatible)
+        self.enable = False  # disabled by default; user must opt in and supply MVC files
+        self.norm_type = emgNormTypeEnum.MVC
 
     def toXML(self):
         e = xmlElement("emgNormalization")
@@ -164,10 +164,7 @@ class emgSummary:
     def __init__(self):
         self.max = 0
         self.min = 0
-        self.med = 0
-        self.rms = 0
-        self.ptp = 0
-        self.zeros = 0
+        self.iemg = 0  # integrated EMG: sum(|x|) * (1/fs) over the analysis segment
 
     def toXML(self):
         e = xmlElement("emgSummary")
@@ -502,7 +499,10 @@ class emg:
         self.rawTST = self.emgTST.copy()
         self.isprocessdone = True
         self.Channels = tst.labels.copy()
-        self.enabledChannels = tst.labels.copy()
+        self.enabledChannels = set(tst.labels)
+        # MVC data is not stored in the report — initialise an empty table so
+        # re-processing does not crash on None['channel'] subscript
+        self.emgMVCTST = timeSeriesTable(tst.fs, tst.labels)
 
     # use channel as key to access TST
     def __getitem__(self, chan):
@@ -820,13 +820,10 @@ class emg:
                 if len(arr) > 0:
                     cfg.max = float(arr.max())
                     cfg.min = float(arr.min())
-                    cfg.med = float(np.median(arr))
-                    cfg.rms = float(np.sqrt(np.mean(arr ** 2)))
-                    cfg.ptp = float(arr.max() - arr.min())
-                    cfg.zeros = int(len(arr) - np.count_nonzero(arr))
+                    # IEMG: trapezoidal integration of absolute values over the segment
+                    cfg.iemg = float(np.trapz(np.abs(arr), dx=1.0 / tst.fs))
                 else:
-                    cfg.max = cfg.min = cfg.med = cfg.rms = cfg.ptp = 0.0
-                    cfg.zeros = 0
+                    cfg.max = cfg.min = cfg.iemg = 0.0
         except Exception as e:
             output = [0] * tst.size()
             import traceback
@@ -910,7 +907,7 @@ class emg:
                           and cfg.cutoff_l < cfg.cutoff_h):
                         sos = _sig.butter(cfg.order, [cfg.cutoff_l, cfg.cutoff_h],
                                           btype='bp', fs=fs, output='sos')
-                        arr = _sig.sosfilt(sos, arr)
+                        arr = _sig.sosfiltfilt(sos, arr)
                     # FULL_W_RECT, LP filter, NORMALIZATION, SUMMARY → skipped
                 except Exception as e:
                     logger.warning("getFreqSafeSegment step {}: {}".format(step_idx, e))
@@ -945,12 +942,12 @@ class emg:
                                 and cfg.cutoff_l < cfg.cutoff_h):
                             sos = _sig.butter(cfg.order, [cfg.cutoff_l, cfg.cutoff_h],
                                               btype='bp', fs=fs, output='sos')
-                            arr = _sig.sosfilt(sos, arr)
+                            arr = _sig.sosfiltfilt(sos, arr)
                         elif (cfg.type == emgFilterEnum.LOW_PASS
                               and 0 < cfg.cutoff_l < fs / 2):
                             sos = _sig.butter(cfg.order, cfg.cutoff_l,
                                               btype='lp', fs=fs, output='sos')
-                            arr = _sig.sosfilt(sos, arr)
+                            arr = _sig.sosfiltfilt(sos, arr)
                     elif stype == emgConfigEnum.FULL_W_RECT and cfg.enable:
                         arr = np.abs(arr)
                     # NORMALIZATION, SUMMARY → skipped; normalization is caller's responsibility

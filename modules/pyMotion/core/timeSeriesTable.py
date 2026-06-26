@@ -374,7 +374,7 @@ class timeSeriesTable:
             raise ValueError("frequency must be 0 < Wn < fs/2")
         # create low pass filter
         sos = self.__butterWorth(N, Wn, "lp")
-        return sig.sosfilt(sos, self.data[key])
+        return sig.sosfiltfilt(sos, self.data[key])
 
     # return ndarray with filterd data
     def bandpass(self, key, Wlow, Whigh, N=2):
@@ -384,36 +384,45 @@ class timeSeriesTable:
             raise ValueError("frequency must be 0 < Wn < fs/2")
         # create band pass filter
         sos = self.__butterWorth(N, [Wlow, Whigh], "bp")
-        return sig.sosfilt(sos, self.data[key])
+        return sig.sosfiltfilt(sos, self.data[key])
 
     # =================================== #
     #          frequency domain           #
     # =================================== #
     # return (frequency, abs(Intensity))
+    # Hann window applied before FFT to reduce spectral leakage.
     @multimethod
     def fft(self, key):
-        return sif.fftfreq(self.n, d=self.ts)[: self.n // 2], np.abs(
-            sif.fft(self.data[key])[0 : self.n // 2]
+        data = np.array(self.data[key], dtype=float)
+        window = np.hanning(len(data))
+        return (
+            sif.fftfreq(self.n, d=self.ts)[: self.n // 2],
+            np.abs(sif.fft(data * window)[: self.n // 2]),
         )
 
     @multimethod
     def fft(self, key, l_t: float, r_t: float):
         left = min(self.n, int(l_t / self.time * self.n))
         right = min(self.n, int(left + (r_t - l_t) / self.time * self.n))
-        totaln = right - left + 1
-        return sif.fftfreq(right - left, d=self.ts)[: totaln // 2], np.abs(
-            sif.fft(self.data[key][left:right])[0 : totaln // 2]
+        segment = np.array(self.data[key][left:right], dtype=float)
+        n_seg = len(segment)
+        if n_seg == 0:
+            return np.array([]), np.array([])
+        window = np.hanning(n_seg)
+        return (
+            sif.fftfreq(n_seg, d=self.ts)[: n_seg // 2],
+            np.abs(sif.fft(segment * window)[: n_seg // 2]),
         )
 
     @multimethod
     def fft_db(self, key):
         x, y = self.fft(key)
-        return x, 20 * np.log10(y)
+        return x, 20 * np.log10(np.maximum(y, 1e-10))
 
     @multimethod
     def fft_db(self, key, l_t: float, r_t: float):
         x, y = self.fft(key, l_t, r_t)
-        return x, 20 * np.log10(y)
+        return x, 20 * np.log10(np.maximum(y, 1e-10))
 
     @multimethod
     def meanFreq(self, key: str):

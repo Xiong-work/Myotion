@@ -7,6 +7,7 @@ from .fuzzMatch import *
 from .logger import *
 import os
 import threading
+import numpy as np
 from ctypes import c_int, addressof
 
 
@@ -250,7 +251,8 @@ class workspace:
         if not self.hasParticipant(person):
             return
         profile = self.profileList[person.name]
-        profile.report = report(person, profile.emg)
+        profile.report = report(person, profile.emg,
+                                crop_interval=profile.crop_interval)
         profile.emg.setProcessDone()
 
     def saveReport(self, person, path):
@@ -260,20 +262,96 @@ class workspace:
         if profile.report is None:
             return
 
+        # each participant gets their own sub-folder under the workspace directory
+        participant_dir = os.path.join(path, person.name)
+        os.makedirs(participant_dir, exist_ok=True)
+
         # save "rpt" report
-        report_name = path + "/" + person.name + ".rpt"
+        report_name = os.path.join(participant_dir, person.name + ".rpt")
         profile.report.writeXML(report_name)
 
-        # save csv
+        # save processed EMG as csv
         if self.reportemgconfig.csv:
-            # utf-16 for excel compactability issue
-            csv_name = path + "/" + person.name + ".csv"
-            emgdf = profile.emg.emgTST.toPandasFrame()
-            emgdf.to_csv(csv_name, sep=",", encoding="utf-8")
+            emg = profile.emg
+            tst = emg.emgTST
+            fs = tst.fs
 
-            mvccsv_name = path + "/" + person.name + "(MVC)" + ".csv"
-            emgmvcdf = profile.emg.emgMVCTST.toPandasFrame()
-            emgmvcdf.to_csv(mvccsv_name, sep=",", encoding="utf-8")
+            # channels that were selected for analysis (in original order)
+            available = set(tst.data.keys())
+            enabled_chans = [
+                c for c in emg.Channels
+                if c in emg.enabledChannels and c in available
+            ]
+
+            # analysis segment bounds
+            ci = profile.crop_interval
+            if ci is not None:
+                seg_start, seg_end = ci[0], ci[1]
+            else:
+                seg_start, seg_end = 0.0, tst.time
+
+            header = (
+                "# Sample frequency: {} Hz\n"
+                "# Analysis segment: {:.3f} s - {:.3f} s\n"
+                "# Channels: {}\n"
+            ).format(fs, seg_start, seg_end, ", ".join(enabled_chans))
+
+            # Build DataFrame with enabled channels only, then crop to the analysis
+            # segment.  Filtering ran on the full signal (in processWithConfigure),
+            # so slicing here avoids filter transients at the cut point.
+            full_df = tst.toPandasFrame()[enabled_chans]
+            n_total = len(full_df)
+            i_start = max(0, min(n_total, int(round(seg_start * fs))))
+            i_end   = max(0, min(n_total, int(round(seg_end   * fs))))
+            emgdf = full_df.iloc[i_start:i_end].reset_index(drop=True).copy()
+            # Time column preserves absolute trial timestamps
+            n_out = len(emgdf)
+            time_arr = np.linspace(seg_start, seg_end, n_out) if n_out > 0 else np.array([])
+            emgdf.insert(0, "Time (s)", time_arr)
+
+            csv_name = os.path.join(
+                participant_dir, person.name + "_emg_processed.csv"
+            )
+            with open(csv_name, "w", encoding="utf-8", newline="") as f:
+                f.write(header)
+                emgdf.to_csv(f, index=False)
+
+            # MVC csv — only channels that have actual MVC data loaded
+            if emg.emgMVCTST and len(emg.emgMVCTST.data) > 0:
+                mvc_tst = emg.emgMVCTST
+                mvc_chans = [
+                    c for c in enabled_chans
+                    if mvc_tst.hasChannel(c) and len(mvc_tst[c]) > 0
+                ]
+                if mvc_chans:
+                    mvc_fs = mvc_tst.fs
+                    mvc_header = (
+                        "# Sample frequency: {} Hz\n"
+                        "# MVC trial (full recording, no crop applied)\n"
+                        "# Channels: {}\n"
+                    ).format(mvc_fs, ", ".join(mvc_chans))
+
+                    # Build DataFrame directly from selected channels only.
+                    # mvc_tst.toPandasFrame() can fail when some channels have data
+                    # and others are empty (emgMVCTST.n stays 0 after initialisation
+                    # so getLinspace() returns an empty array regardless of data length).
+                    import pandas as _pd
+                    mvcdf = _pd.DataFrame(
+                        {c: _pd.Series(mvc_tst[c]) for c in mvc_chans}
+                    )
+                    n_mvc = len(mvcdf)
+                    mvc_time = (
+                        np.linspace(0.0, n_mvc / mvc_fs, n_mvc)
+                        if n_mvc > 0 else np.array([])
+                    )
+                    mvcdf.insert(0, "Time (s)", mvc_time)
+
+                    mvccsv_name = os.path.join(
+                        participant_dir, person.name + "_mvc_processed.csv"
+                    )
+                    with open(mvccsv_name, "w", encoding="utf-8", newline="") as f:
+                        f.write(mvc_header)
+                        mvcdf.to_csv(f, index=False)
 
     def saveWorkSpace(self, path):
         filename = os.path.normpath(path + "/" + self.name + PROJ_EXT)
@@ -374,24 +452,43 @@ class workspace:
     def emgAsyncLoader(self, pending_load, doneCallback, errorCallback):
         for name, profile in pending_load.items():
             try:
-                if profile.report == None:
+                emg_file = profile.emg.emgFile
+                original_exists = (
+                    emg_file is not None
+                    and len(str(emg_file).strip()) > 0
+                    and os.path.isfile(str(emg_file))
+                )
+
+                if original_exists:
+                    # Always load from the original source file when it is available.
+                    # This preserves the true rawTST so the pipeline sees unprocessed
+                    # signal when the user clicks Signal Processing again.
+                    # The .rpt report is kept for export only — not as the signal source.
                     logger.info(
-                        "emg async loader: loading profile {} from {}".format(
-                            name, profile.emg.emgFile
+                        "emg async loader: loading profile {} from original file {}".format(
+                            name, emg_file
                         )
                     )
-                    # load data from emg
                     asyncio.run(profile.emg.async_load())
-                else:
+                    if profile.report is not None:
+                        # Flag that this participant was previously processed
+                        profile.emg.isprocessdone = True
+                elif profile.report is not None:
+                    # Original file is missing — fall back to report data
                     logger.info(
-                        "emg async loader: loading profile {} from {}".format(
+                        "emg async loader: original file missing, loading {} from report {}".format(
                             name, profile.report.fpath
                         )
                     )
-                    # load data from report
                     tst = profile.report.async_load()
-                    # construct emg from tst
                     profile.emg.load_from_report(tst)
+                else:
+                    logger.info(
+                        "emg async loader: loading profile {} from {}".format(
+                            name, emg_file
+                        )
+                    )
+                    asyncio.run(profile.emg.async_load())
                 # load kinematics data
                 profile.kinematic = kinematic(profile.emg.emgFile)
                 logger.info("emg async loader: done")
