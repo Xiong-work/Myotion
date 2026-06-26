@@ -27,7 +27,9 @@ from PySide6.QtWebEngineCore import (
     QWebEngineUrlRequestJob,
     QWebEngineProfile,
     QWebEnginePage,
+    QWebEngineDownloadRequest,
 )
+import os
 from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
@@ -41,6 +43,7 @@ from PySide6.QtWidgets import (
     QTreeView,
     QScrollArea,
     QPushButton,
+    QFileDialog,
     QLabel,
 )
 import math
@@ -120,6 +123,10 @@ class QPlotView(QWebEngineView):
         self.parent = parent
         self.fig = None
 
+        # save context — set via set_save_path() before user clicks the camera icon
+        self._save_dir = None
+        self._save_name = None
+
         # create new profile
         self.profile = QWebEngineProfile(parent)
 
@@ -130,6 +137,9 @@ class QPlotView(QWebEngineView):
             bytes(URL_SCHEME, "ascii"), self.schemeHandler
         )
 
+        # redirect Plotly camera-icon downloads to the participant folder
+        self.profile.downloadRequested.connect(self._on_download_requested)
+
         # create new page
         self.page = QWebEnginePage(self.profile, parent)
         self.setPage(self.page)
@@ -138,6 +148,40 @@ class QPlotView(QWebEngineView):
         self.url = QUrl("any_url_works_to_trigger_handler")
         self.url.setScheme(URL_SCHEME)
         self.setUrl(self.url)
+
+    def set_save_path(self, directory, filename_stem):
+        """Set the default directory and suggested filename for the next camera-icon save.
+
+        Args:
+            directory: absolute path to the participant folder (created on demand)
+            filename_stem: suggested base name without extension (e.g. 'L-Ant_full_wave_rect')
+        """
+        self._save_dir = directory
+        self._save_name = filename_stem
+
+    def _on_download_requested(self, download):
+        """Intercept Plotly camera-icon downloads and show a save-as dialog."""
+        suggested_dir = self._save_dir or os.path.expanduser("~")
+        suggested_name = (self._save_name or "plot") + ".png"
+        suggested_path = os.path.join(suggested_dir, suggested_name)
+
+        path, _ = QFileDialog.getSaveFileName(
+            None,
+            "Save Plot",
+            suggested_path,
+            "PNG Images (*.png)",
+        )
+
+        if not path:
+            download.cancel()
+            return
+
+        save_dir = os.path.dirname(path)
+        save_name = os.path.basename(path)
+        os.makedirs(save_dir, exist_ok=True)
+        download.setDownloadDirectory(save_dir)
+        download.setDownloadFileName(save_name)
+        download.accept()
 
     # style setting
     def update_layout(self, y_label=Y_LABEL, xrange=None):

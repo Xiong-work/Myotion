@@ -18,6 +18,7 @@ import sys
 import os
 import re
 from pathlib import Path
+from thefuzz import fuzz as _fuzz
 import webbrowser
 import argparse
 
@@ -104,6 +105,122 @@ class BatchEMGWorker(QThread):
         self.finished.emit()
 
 
+# ---------------------------------------------------------------------------
+# EMG channel → muscle-name smart guessing
+# ---------------------------------------------------------------------------
+
+# Strip known sensor-brand/system prefixes.
+_BRAND_STRIP_RE = re.compile(
+    r'^(?:'
+    r'(?:Delsys|Trigno|Noraxon|Cometa|BioNomadix|BIOPAC|Biometrics|Wave)[.\-_ ]?|'
+    r'Sensor\s*\d+[.\-_ ]|'
+    r'Ch(?:annel)?\s*\d+[.\-_ ]'
+    r')+',
+    re.IGNORECASE,
+)
+# Strip generic EMG prefix/suffix.
+_EMG_AFFIX_RE = re.compile(
+    r'(?:^EMG[.\-_ ]?|[.\-_ ]?EMG\s*\d*$|\s*\d+$)',
+    re.IGNORECASE,
+)
+# Sync / trigger channels that are never EMG signals.
+_SYNC_CHANNEL_RE = re.compile(
+    r'\b(?:sync|同步|reference|trigger|trig|clock)\b',
+    re.IGNORECASE,
+)
+
+# Lazily built on first call to avoid circular-import issues at module level.
+# (main.py → modules → ui_functions → main.py means muscleName is not yet defined
+#  when module-level code runs.)
+_MUSCLE_BASE_NAMES = None
+
+def _get_muscle_bases():
+    global _MUSCLE_BASE_NAMES
+    if _MUSCLE_BASE_NAMES is None:
+        from modules.pyMotion.core.muscleName import muscleName as _mn
+        seen, result = set(), []
+        for s, l in zip(_mn.short, _mn.long):
+            base_s, base_l = s[:-2], l[:-2]
+            if base_s not in seen:
+                seen.add(base_s)
+                result.append((base_s, base_l))
+        _MUSCLE_BASE_NAMES = result
+    return _MUSCLE_BASE_NAMES
+
+
+def _is_sync_channel(chan: str) -> bool:
+    """Return True if the channel is a sync/trigger line, not an EMG signal."""
+    return bool(_SYNC_CHANNEL_RE.search(chan))
+
+
+def _detect_side(chan: str):
+    """Return 'L', 'R', or None from channel label."""
+    if re.search(r'右|right\b', chan, re.IGNORECASE):
+        return 'R'
+    if re.search(r'左|left\b', chan, re.IGNORECASE):
+        return 'L'
+    m = re.search(r'[-_\s.]([RL])\s*$', chan, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return None
+
+
+def _tokenise_channel(chan: str):
+    """Extract meaningful tokens from a channel label for muscle matching."""
+    text = _BRAND_STRIP_RE.sub('', chan)
+    text = re.sub(r'[一-鿿←-⇿→←↑↓]', ' ', text)  # CJK / arrows
+    text = re.sub(r'\b(?:right|left)\b', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'[-_.\\/()[\]]+', ' ', text)
+    return [t for t in text.upper().split()
+            if len(t) >= 2 and t not in ('L', 'R', 'LL', 'RR')]
+
+
+def _guess_muscle_from_channel(chan: str):
+    """Return best matching muscle short name (with side) from a raw channel label.
+
+    Strategy:
+      1. Detect side from Chinese chars (右=R, 左=L) or trailing -R/-L.
+      2. Strip brand prefix + EMG affix; try exact / substring match on short names.
+      3. Tokenise the remaining text; score each token with partial_ratio against
+         every muscle's LONG base name — handles abbreviations like "TIB ANT" for
+         "Tibialis Anterior" and "LUMBAR ES" for "Lumbar Erector Spinae".
+      4. Combine best-scoring base with detected side.
+    """
+    side = _detect_side(chan)
+
+    # Fast path: exact or substring match on short names after cleaning
+    cleaned = _BRAND_STRIP_RE.sub('', chan)
+    cleaned = _EMG_AFFIX_RE.sub('', cleaned)
+    normed = re.sub(r'[_\s.]+', '-', cleaned).strip('-').upper()
+    for short in muscleName.short:
+        if normed == short.upper():
+            return short
+    for short in muscleName.short:
+        if short.upper() in normed:
+            return short
+
+    # Token-level matching against long muscle names
+    tokens = _tokenise_channel(chan)
+    if not tokens:
+        return None
+
+    best_score = 65.0
+    best_base_s = None
+    for base_s, base_l in _get_muscle_bases():
+        base_l_lo = base_l.lower()
+        scores = [_fuzz.partial_ratio(t.lower(), base_l_lo) for t in tokens]
+        avg = sum(scores) / len(scores)
+        if avg > best_score:
+            best_score = avg
+            best_base_s = base_s
+
+    if best_base_s is None:
+        return None
+
+    candidate = best_base_s + ('-R' if side == 'R' else '-L' if side == 'L' else '')
+    return candidate if candidate in muscleName.short else None
+
+
 class EMGAddWindow(QMainWindow):
     finished = Signal(tuple)  # Signal emitted when the window closes, returning results.
 
@@ -123,6 +240,7 @@ class EMGAddWindow(QMainWindow):
         self.widgets = self.ui
         self.workspace = workspace
         self.root = home
+        self._emg_dir = None          # folder of the last loaded EMG file
         self.emg = None
         self.kinematic = None
         self.person = None
@@ -134,9 +252,15 @@ class EMGAddWindow(QMainWindow):
 
         self.widgets.import_btn.clicked.connect(self.importEMGBtnClicked)
         self.widgets.lineEdit.textChanged.connect(self.updateFilterText)
+        self.widgets.lineEdit.setPlaceholderText(self.tr("Search channels…"))
         self.widgets.import_btn_2.clicked.connect(self.confirmBtnClicked)
         self.widgets.import_btn_3.clicked.connect(self.cancelBtnClicked)
         self.widgets.importMVC_btn.clicked.connect(self.importMVCBtnClicked)
+
+        # Clicking the "Select" column header toggles all channel checkboxes
+        hdr = self.widgets.tableWidget.horizontalHeader()
+        hdr.setSectionResizeMode(1, QHeaderView.Fixed)
+        hdr.sectionClicked.connect(self._onSelectHeaderClicked)
 
         self._scan_folder_btn = QPushButton(self.tr("Scan Folder..."))
         self._scan_folder_btn.setCursor(Qt.PointingHandCursor)
@@ -269,12 +393,12 @@ class EMGAddWindow(QMainWindow):
     def selectSignalCheckbox(self, chan):
         checkbox = QCheckBox()
         checkbox.setObjectName(chan)
+        # Set initial state BEFORE connecting the signal — connecting first would
+        # cause setChecked() to fire selectedSignalChanged and toggle the state back.
+        enabled = self.isEnabled.get(chan, False)
+        self.isEnabled[chan] = enabled
+        checkbox.setChecked(enabled)
         checkbox.stateChanged.connect(self.selectedSignalChanged)
-        if chan in self.isEnabled:
-            checkbox.setChecked(self.isEnabled[chan])
-        else:
-            self.isEnabled[chan] = False
-            checkbox.setChecked(False)
 
         QWid = QWidget()
         QHBox = QHBoxLayout(QWid)
@@ -293,6 +417,10 @@ class EMGAddWindow(QMainWindow):
     def MVCFilesChanged(self, index):
         mvcBox = self.sender()
         chan = mvcBox.objectName()
+        # index = -1 means "no selection" (setCurrentIndex(-1) fires this slot).
+        # Python's mvcfiles[-1] would silently return the last file — guard against it.
+        if index < 0 or index >= len(self.mvcfiles):
+            return
         self.mvcfilesMap[chan] = index
         # apply MVC
         try:
@@ -309,26 +437,21 @@ class EMGAddWindow(QMainWindow):
     def selectedSignalChanged(self, state):
         checkbox = self.sender()
         chan = checkbox.objectName()
-        self.isEnabled[chan] = not self.isEnabled[chan]
-
-        if self.isEnabled[chan]:
+        # Use the actual checkbox state — never toggle, as that breaks when
+        # updateChannelBox() recreates checkboxes and setChecked() fires this slot.
+        enabled = bool(state)   # Qt.Checked = 2 → True; Qt.Unchecked = 0 → False
+        self.isEnabled[chan] = enabled
+        if enabled:
             self.emg.enableChannel(chan)
         else:
             self.emg.disableChannel(chan)
 
     def updateFilterText(self):
-        filter_str = self.widgets.lineEdit.text()
-        if filter_str == "":
-            filter_str = ".*"
-
-        # check valid regex string
-        try:
-            re.compile(filter_str)
-        except re.error:
-            logger.error("regex not valid")
-            return
-
-        self.channels = self.emg.searchChannels(filter_str)
+        text = self.widgets.lineEdit.text().strip().lower()
+        all_chans = self.emg.getAllChannels() if self.emg else []
+        self.channels = (
+            [c for c in all_chans if text in c.lower()] if text else all_chans
+        )
         self.updateChannelBox()
 
     def importEMGBtnClicked(self):
@@ -353,7 +476,7 @@ class EMGAddWindow(QMainWindow):
             return
 
         self.file = file
-        # open up emg MVC file
+        self._emg_dir = os.path.dirname(file)   # default dir for MVC dialog
         try:
             self.emg = emg(file)
         except Exception as e:
@@ -365,11 +488,11 @@ class EMGAddWindow(QMainWindow):
             )
             return
 
-        # get channels and update list
-        self.channels = self.emg.getAllChannels()
-
+        # exclude sync/trigger channels — they are never EMG signals
+        self.channels = [
+            c for c in self.emg.getAllChannels() if not _is_sync_channel(c)
+        ]
         self.widgets.label_3.setText(file)
-        # auto apply joint matching on joint mapping
         self.applyFuzzMatchOnJoint()
         self.updateChannelBox()
 
@@ -389,7 +512,7 @@ class EMGAddWindow(QMainWindow):
         files, extension = QFileDialog.getOpenFileNames(
             None,
             caption="open MVC file",
-            dir=self.root,
+            dir=self._emg_dir or self.root,
             filter="EMG Files (*.c3d *.mat)",
         )
 
@@ -435,39 +558,69 @@ class EMGAddWindow(QMainWindow):
         self.updateChannelBox()
 
     def applyFuzzMatchOnMVC(self):
+        if not self.mvcfiles:
+            return
+
         filenames = [os.path.basename(f) for f in self.mvcfiles]
+
+        # Single MVC file — covers all muscles; assign to every channel automatically
+        if len(self.mvcfiles) == 1:
+            for c in self.channels:
+                self.mvcfilesMap[c] = 0
+            logger.info("EMG ADD MVC: single MVC file, assigned to all channels")
+            return
+
+        # Multiple files — try filename fuzzy match per channel
         for c in self.channels:
             candidate_list = self.workspace.matchChanToMVCFile(
                 c, filenames, lower_bound=50
             )
             if len(candidate_list) == 0:
-                logger.info("EMG ADD MVC: no candidate found")
+                logger.info("EMG ADD MVC: no candidate found for {}".format(c))
                 continue
-            else:
-                file, possibility = candidate_list[0]
-                logger.info(
-                    "EMG ADD MVC: selecting file {} for chan {}, possibility {}".format(
-                        file, c, possibility
-                    )
-                )
-                self.mvcfilesMap[c] = filenames.index(file)
+            file, possibility = candidate_list[0]
+            logger.info(
+                "EMG ADD MVC: {} → {} ({:.0f}%)".format(c, file, possibility)
+            )
+            self.mvcfilesMap[c] = filenames.index(file)
 
     def applyFuzzMatchOnJoint(self):
         for c in self.channels:
-            # set only when possiblity bigger than 50%
+            # 1. Try direct name-based guess first (strips brand, normalises separators)
+            guess = _guess_muscle_from_channel(c)
+            if guess is not None:
+                logger.info(
+                    "EMG Select Joint: name-guess {} → {}".format(c, guess)
+                )
+                self.muscleMap[c] = guess
+                continue
+
+            # 2. Fall back to workspace fuzz-match history (lower_bound 50 %)
             candidate_list = self.workspace.matchChanToJoint(
                 c, muscleName.short, lower_bound=50
             )
-            if len(candidate_list) == 0:
-                continue
-            else:
+            if candidate_list:
                 joint, possibility = candidate_list[0]
                 logger.info(
-                    "EMG Select Joint: selecting Joint {} for chan {}, possibility {}".format(
-                        joint, c, possibility
+                    "EMG Select Joint: fuzz-match {} → {} ({:.0f}%)".format(
+                        c, joint, possibility
                     )
                 )
                 self.muscleMap[c] = joint
+
+    def _onSelectHeaderClicked(self, col):
+        """Toggle all channel checkboxes when the 'Select' column header is clicked."""
+        if col != 1 or not self.channels or self.emg is None:
+            return
+        all_on = all(self.isEnabled.get(c, False) for c in self.channels)
+        new_state = not all_on
+        for c in self.channels:
+            self.isEnabled[c] = new_state
+            if new_state:
+                self.emg.enableChannel(c)
+            else:
+                self.emg.disableChannel(c)
+        self.updateChannelBox()
 
     def sanity(self):
         # check emg file is selected
@@ -476,15 +629,21 @@ class EMGAddWindow(QMainWindow):
                 None, self.tr("error"), self.tr("No EMG file selected!"), QMessageBox.Ok
             )
             return False
-        # check mvc file is complete
+        # warn if no MVC files provided — user can still proceed without them,
+        # but MVC normalization will not be available during processing
         if not self.emg.isMVCComplete():
-            QMessageBox.critical(
+            reply = QMessageBox.warning(
                 None,
-                self.tr("error"),
-                self.tr("MVC file not complete!"),
-                QMessageBox.Ok,
+                self.tr("warning"),
+                self.tr(
+                    "No MVC files provided (or some channels are missing MVC data).\n"
+                    "MVC normalization will not be available during processing.\n\n"
+                    "Continue without MVC files?"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
             )
-            return False
+            if reply != QMessageBox.Yes:
+                return False
         # check pariticipant name is complete and no duplicates
         name = self.widgets.lineEdit_3.text()
         if name == "":
@@ -627,7 +786,9 @@ class EMGAddWindow(QMainWindow):
             )
             return
 
-        self.channels = self.emg.getAllChannels()
+        self.channels = [
+            c for c in self.emg.getAllChannels() if not _is_sync_channel(c)
+        ]
         self.widgets.label_3.setText(emg_file)
         self.applyFuzzMatchOnJoint()
 
@@ -756,6 +917,48 @@ class EMGConfigWindow(QDialog):
         self.ui.band_pass_high.setValue(bp.cutoff_h)
 
 
+class EMGConfigEditDialog(QDialog):
+    """View / edit a saved emgConfigure using the same pipeline panel the user
+    sees during single-EMG processing — avoids the label-swap, range, and
+    order-index bugs in the old Ui_EMGConfigWindow form."""
+
+    def __init__(self, cfg, fs=2000, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("EMG Config")
+        self.setMinimumSize(320, 520)
+        self.setWindowFlag(Qt.WindowMaximizeButtonHint)
+        self.setSizeGripEnabled(True)
+        self._cfg = cfg
+        self._accepted = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        self._panel = EMGPipelinePanel(self)
+        self._panel.load(cfg, fs)
+        layout.addWidget(self._panel)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton(self.tr("Cancel"))
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton(self.tr("Save"))
+        save_btn.setDefault(True)
+        save_btn.clicked.connect(self._on_save)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+    def _on_save(self):
+        self._accepted = True
+        self.accept()
+
+    def run(self):
+        self.exec()
+        return self._accepted, self._cfg
+
+
 class MainWindow(QMainWindow):
     # SIGNALS
     sigUpdateParticipants = Signal()
@@ -805,6 +1008,29 @@ class MainWindow(QMainWindow):
         self._replace_start_middle_with_logo()
         widgets.middle.hide()   # sign-in / sign-up removed (open-source build)
         self._generate_custom_icons()
+
+        # Hide panels the user removed from the workflow:
+        # 1. Participant List sidebar — workspace tree already shows all participants
+        widgets.paticipant_list.hide()
+        # 2. Configuration Log — duplicated by the pipeline step cards
+        widgets.configuration_list.hide()
+
+        # Fix plot panel labels — retranslateUi used a placeholder "Plot"
+        widgets.label_12.setText(self.tr("Current Process"))
+
+        # "Load EMG Data" buttons are disabled until a workspace is open
+        self._set_add_emg_enabled(False)
+
+        # "Clear Workspace" button — inserted above "New Project" (btn_new) in the sidebar
+        self._btn_clear_ws = QPushButton(self.tr("Clear Workspace"))
+        self._btn_clear_ws.setMinimumHeight(45)
+        self._btn_clear_ws.setCursor(Qt.PointingHandCursor)
+        self._btn_clear_ws.setStyleSheet(
+            "color:#f4f4f4; background-color:rgba(180,60,60,0.75);"
+            " font-weight:bold; text-align:left; padding-left:8px;"
+        )
+        self._btn_clear_ws.clicked.connect(self.clearWorkspaceButtonClick)
+        widgets.verticalLayout_11.insertWidget(0, self._btn_clear_ws)
 
         # QTableWidget PARAMETERS
         # ///////////////////////////////////////////////////////////////
@@ -884,6 +1110,7 @@ class MainWindow(QMainWindow):
         widgets.pushButton_27.clicked.connect(self.EMGSaveConfigurationButtonClicked)
         widgets.pushButton_12.clicked.connect(self.EMGBatchProcessButtonClicked)
         widgets.pushButton_12.setEnabled(False)
+        widgets.pushButton_15.clicked.connect(self.removeEMGConfig)
         widgets.lineEdit_3.textChanged.connect(self.updateFilterText)
         widgets.checkBox_2.stateChanged.connect(self.EMGParticipantSelectAllClicked)
 
@@ -894,6 +1121,16 @@ class MainWindow(QMainWindow):
         widgets.pushButton_32.clicked.connect(self.FFTPlotClearAllClicked)
         widgets.comboBox_19.currentIndexChanged.connect(self.FFTPlotPerPageSelected)
         widgets.comboBox_20.currentIndexChanged.connect(self.FFTPlotPageIndexSelected)
+
+        # Export button at the bottom of the participants panel
+        self._btn_export_freq = QPushButton(self.tr("Export Freq Results"))
+        self._btn_export_freq.setCursor(Qt.PointingHandCursor)
+        self._btn_export_freq.setStyleSheet(
+            "color:#f4f4f4; background-color:#6272a4;"
+            " border-radius:6px; padding:6px 10px; font-weight:bold; margin:4px;"
+        )
+        self._btn_export_freq.clicked.connect(self.exportFreqAnalysisCSV)
+        widgets.verticalLayout_140.addWidget(self._btn_export_freq)
 
         # start page
         # widgets.settingsTopBtn.hide()
@@ -971,6 +1208,25 @@ class MainWindow(QMainWindow):
         widgets.verticalLayout_42.insertWidget(0, self._pipeline_panel)
         self._pipeline_panel.configChanged.connect(self._onPipelineStepChanged)
         self._pipeline_panel.stepSelected.connect(self.selectSingleEMGStep)
+
+        # Action bar — "Export Report & CSV" button shown below the pipeline cards
+        # (pushButton_26/27 are buried in the hidden toolBox Summary page so they are inaccessible)
+        self._emg_action_bar = QFrame(widgets.data_process_instruction)
+        self._emg_action_bar.setStyleSheet("border-top: 1px solid rgba(255,255,255,0.1);")
+        _abar_layout = QHBoxLayout(self._emg_action_bar)
+        _abar_layout.setContentsMargins(8, 6, 8, 6)
+        _abar_layout.setSpacing(6)
+        _abar_layout.addStretch()
+        self._btn_export_report = QPushButton(self.tr("Export Report && CSV"))
+        self._btn_export_report.setCursor(Qt.PointingHandCursor)
+        self._btn_export_report.setStyleSheet(
+            "color:#f4f4f4; background-color:#2a9d8f;"
+            " border-radius:6px; padding:6px 18px; font-weight:bold;"
+        )
+        self._btn_export_report.clicked.connect(self.EMGGenerateReportButtonClicked)
+        _abar_layout.addWidget(self._btn_export_report)
+        widgets.verticalLayout_42.addWidget(self._emg_action_bar)
+        self._emg_action_bar.hide()
 
         # Manual crop group — compact widget at the top of the instruction panel
         _LBL_S = "color: #c8c8c8; font-size: 9pt;"
@@ -1352,7 +1608,27 @@ class MainWindow(QMainWindow):
         self.singleEMGButtonClick()
         self.saveProjectButtonClick(show=False)
 
+    def _set_add_emg_enabled(self, enabled: bool):
+        """Enable or disable all 'Load EMG Data' buttons as a group."""
+        for btn in (widgets.pushButton_18, widgets.pushButton_161,
+                    widgets.pushButton_10):
+            btn.setEnabled(enabled)
+            btn.setToolTip(
+                "" if enabled
+                else self.tr("Create or load a workspace first.")
+            )
+
     def addEMGButtonClick(self):
+        if self.workspace is None:
+            QMessageBox.warning(
+                self, self.tr("warning"),
+                self.tr(
+                    "No workspace is open.\n"
+                    "Please create a new project or load an existing one first."
+                ),
+                QMessageBox.Ok,
+            )
+            return
         # create person
         self.emg_add_window = EMGAddWindow(self.workspace, self.home, 1200, 800)
         
@@ -1632,6 +1908,33 @@ class MainWindow(QMainWindow):
             else:
                 return -1
         return 0
+
+    def clearWorkspaceButtonClick(self):
+        """Close the current workspace in memory. Files on disk are NOT deleted."""
+        if self.workspace is None:
+            QMessageBox.information(
+                self, self.tr("Clear Workspace"),
+                self.tr("No workspace is currently open."),
+                QMessageBox.Ok,
+            )
+            return
+        reply = QMessageBox.warning(
+            self,
+            self.tr("Clear Workspace"),
+            self.tr(
+                "This will close '{}' and clear all in-memory data.\n"
+                "Files on disk are NOT deleted — you can reload the project at any time.\n\n"
+                "Continue?"
+            ).format(self.workspace.name),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.reset()
+        self._set_add_emg_enabled(False)
+        self.updateWorkProjectTreeWidget()
+        self.updateEMGParticipantBox()
+        self.updateEMGSavedConfigureList()
 
     def newProjectButtonClick(self):
         if self.ifOldProjectOpened():
@@ -2104,17 +2407,47 @@ class MainWindow(QMainWindow):
             return
 
         # apply configuration on all chans in EMG and MVC
-        # this might takes a while
-        self.workspace[p].emg.processWithConfigure(
-            crop_interval=self.workspace[p].crop_interval
-        )
+        try:
+            self.workspace[p].emg.processWithConfigure(
+                crop_interval=self.workspace[p].crop_interval
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, self.tr("error"),
+                self.tr("Processing failed: {}").format(str(e)),
+                QMessageBox.Ok,
+            )
+            return
 
-        # save report
-        self.workspace.genReport(p)
-        self.workspace.saveReport(p, self.home)
+        # persist config to saved_emgconfig so batch processing can use it
+        self.EMGSaveConfigurationButtonClicked()
+
+        # generate and save report + CSVs to participant folder
+        save_ok = False
+        try:
+            self.workspace.genReport(p)
+            self.workspace.saveReport(p, self.home)
+            save_ok = True
+        except Exception as e:
+            QMessageBox.critical(
+                self, self.tr("error"),
+                self.tr("Failed to save report for {}: {}").format(p.name, str(e)),
+                QMessageBox.Ok,
+            )
+
+        if save_ok:
+            participant_dir = os.path.join(self.home, p.name)
+            QMessageBox.information(
+                self, self.tr("Saved"),
+                self.tr(
+                    "Processed EMG results have been saved to the workspace folder:\n{}"
+                ).format(participant_dir),
+                QMessageBox.Ok,
+            )
 
         # exit single process stage
         self.singleEMG = (None, None, None)
+        self._emg_action_bar.hide()
         self.updateEMGSignalProcessPanel()
         self.updateEMGConfigureList()
 
@@ -2190,7 +2523,7 @@ class MainWindow(QMainWindow):
             config = configureList[config_name]
         else:
             # pick any one
-            config_name = configureList.keys()[0]
+            config_name = next(iter(configureList))
             config = configureList[config_name]
 
         logger.info("batch process: select configure {}".format(config_name))
@@ -2219,9 +2552,25 @@ class MainWindow(QMainWindow):
                 logger.info("batch process: cancelled due to mixed sampling rates")
                 return
 
-        isStart, cfg = EMGConfigWindow(config, False).run()
-        if isStart:
-            self.startBatchEMGProcess(listofpeople, cfg)
+        # Confirm batch start — show config name, pipeline steps, participant list.
+        # (EMGConfigWindow used the old Ui_EMGConfigWindow which is incompatible
+        # with the new pipeline config structure, so we bypass it entirely.)
+        step_list = "\n".join(
+            "  • {}".format(s) for s in config.getStepStringList()
+        )
+        participant_list = ", ".join(p.name for p in listofpeople)
+        reply = QMessageBox.question(
+            self,
+            self.tr("Start batch processing?"),
+            self.tr(
+                "Config: {}\n\nPipeline:\n{}\n\nParticipants ({}): {}\n\n"
+                "Results will be saved to each participant’s folder.\n\n"
+                "Start?"
+            ).format(config_name, step_list, len(listofpeople), participant_list),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.startBatchEMGProcess(listofpeople, config)
         else:
             logger.info("batch process: cancelled")
 
@@ -2253,6 +2602,110 @@ class MainWindow(QMainWindow):
     def FFTPlotClearAllClicked(self):
         widgets.scrollArea_3.deleteAllPages()
         self.updateFreqAnalysisFFTPanel()
+
+    def exportFreqAnalysisCSV(self):
+        p, _ = self.freqAnalysis
+        if p is None:
+            QMessageBox.warning(
+                self, self.tr("warning"),
+                self.tr("Select a participant channel in the tree first."),
+                QMessageBox.Ok,
+            )
+            return
+
+        crop = self.workspace[p].crop_interval
+        fs   = self.workspace[p].emg.getfs()
+        chans = self.workspace[p].emg.getChannels()
+        seg_start = crop[0] if crop is not None else 0.0
+
+        # Read the window and split count that the user set in the freq UI —
+        # these must match what the FFT plots show.
+        try:
+            left_abs  = float(widgets.lineEdit_5.text())
+            right_abs = float(widgets.lineEdit_4.text())
+        except Exception:
+            left_abs, right_abs = seg_start, seg_start
+        try:
+            num_intervals = max(1, int(widgets.lineEdit_6.text()))
+        except Exception:
+            num_intervals = 1
+
+        # Convert absolute trial times → segment-relative for fft()
+        # (the freq-safe TST always starts at t = 0)
+        seg_dur_ref = None  # filled from first channel
+        interval_abs = (right_abs - left_abs) / num_intervals
+
+        fieldnames = ["Channel", "Start (s)", "End (s)", "MNF (Hz)", "MDF (Hz)"]
+        rows = []
+        for chan in chans:
+            arr = self.workspace[p].emg.getFreqSafeSegment(chan, crop)
+            if len(arr) == 0:
+                for i in range(num_intervals):
+                    rows.append({
+                        "Channel": chan,
+                        "Start (s)": round(left_abs + i * interval_abs, 4),
+                        "End (s)":   round(left_abs + (i + 1) * interval_abs, 4),
+                        "MNF (Hz)": "", "MDF (Hz)": "",
+                    })
+                continue
+
+            seg_dur = len(arr) / fs
+            if seg_dur_ref is None:
+                seg_dur_ref = seg_dur
+
+            tst = timeSeriesTable(fs, [chan], [arr])
+
+            for i in range(num_intervals):
+                t_abs_start = left_abs  + i * interval_abs
+                t_abs_end   = t_abs_start + interval_abs
+                # relative times for fft()
+                t_rel_start = max(0.0, min(t_abs_start - seg_start, seg_dur))
+                t_rel_end   = max(0.0, min(t_abs_end   - seg_start, seg_dur))
+
+                freq_lin, v_lin = tst.fft(chan, t_rel_start, t_rel_end)
+                total = float(np.sum(v_lin))
+                if total > 0:
+                    mnf = float(np.dot(freq_lin, v_lin) / total)
+                    cum = np.cumsum(v_lin)
+                    idx = min(len(freq_lin) - 1,
+                              int(np.searchsorted(cum, cum[-1] / 2, side="right")))
+                    mdf = float(freq_lin[idx])
+                else:
+                    mnf = mdf = 0.0
+
+                rows.append({
+                    "Channel":   chan,
+                    "Start (s)": round(t_abs_start, 4),
+                    "End (s)":   round(t_abs_end,   4),
+                    "MNF (Hz)":  round(mnf, 4),
+                    "MDF (Hz)":  round(mdf, 4),
+                })
+
+        header = (
+            "# Participant: {}\n"
+            "# Sample frequency: {} Hz\n"
+            "# Analysis window: {:.3f} s - {:.3f} s ({} interval{})\n"
+        ).format(p.name, fs, left_abs, right_abs,
+                 num_intervals, "s" if num_intervals > 1 else "")
+
+        participant_dir = os.path.join(self.home, p.name)
+        os.makedirs(participant_dir, exist_ok=True)
+        save_path = os.path.join(participant_dir, p.name + "_freq_analysis.csv")
+
+        import csv as _csv
+        with open(save_path, "w", encoding="utf-8", newline="") as f:
+            f.write(header)
+            writer = _csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        QMessageBox.information(
+            self, self.tr("Saved"),
+            self.tr(
+                "Frequency analysis results have been saved to the workspace folder:\n{}"
+            ).format(participant_dir),
+            QMessageBox.Ok,
+        )
 
     def FFTPlotNextPageClicked(self):
         widgets.scrollArea_3.nextPage()
@@ -2319,19 +2772,43 @@ class MainWindow(QMainWindow):
         return timeSeriesTable(fs, [channel], [arr])
 
     # draw FFT
-    def FreqAnalysisCreateQPlotView(self, p, channel, l, r, title):
+    # l, r are segment-relative seconds (0-based); seg_start offsets them for display/filenames
+    def FreqAnalysisCreateQPlotView(self, p, channel, l, r, title, seg_start=0.0):
         pv = QPlotView()
+        chan_slug = re.sub(r"[^a-zA-Z0-9]+", "_", channel).strip("_")
+        participant_dir = os.path.join(self.home, p.name)
+        # Ensure the folder exists so the save dialog opens directly in it
+        os.makedirs(participant_dir, exist_ok=True)
+        # Filename uses absolute trial times for clarity
+        l_abs, r_abs = l + seg_start, r + seg_start
+        pv.set_save_path(
+            participant_dir,
+            "{}_freq_{:.3f}s_{:.3f}s".format(chan_slug, l_abs, r_abs),
+        )
         # Use frequency-safe signal: DC + band-pass only, no envelope, no normalization
         tst = self._get_freq_safe_tst(p, channel)
         freq, v = tst.fft_db(channel, l, r)
 
-        # mean frequency with filtered value
-        medFreq = np.dot(freq, v) / np.sum(v)
-        title = title + ", Median Frequency {}".format(medFreq)
+        # Compute mean and median frequency from the LINEAR amplitude spectrum.
+        # fft_db returns 20*log10(amplitude) — using those dB values directly in
+        # a weighted-sum formula produces nonsense (sum of negatives / sum of negatives).
+        freq_lin, v_lin = tst.fft(channel, l, r)
+        if len(freq_lin) > 0 and np.sum(v_lin) > 0:
+            mean_freq = float(np.dot(freq_lin, v_lin) / np.sum(v_lin))
+            cum = np.cumsum(v_lin)
+            med_idx = min(len(freq_lin) - 1,
+                          np.searchsorted(cum, cum[-1] / 2, side="right"))
+            med_freq = float(freq_lin[med_idx])
+        else:
+            mean_freq = med_freq = 0.0
 
-        # pv.bar(freq, v, channel, title=title,xlabel='Frequency', ylabel='dB')
-        # pv.show()
-        pv.line(freq, v, channel, title=title, xlabel="Frequency", ylabel="dB")
+        title = title + ",  MeanF {:.1f} Hz  |  MedF {:.1f} Hz".format(
+            mean_freq, med_freq
+        )
+
+        # Distinct amber colour — separates freq plots from time-domain blue/red
+        pv.line(freq, v, channel, title=title, xlabel="Frequency (Hz)", ylabel="dB",
+                color=["#ffb86c"])
         return pv
 
     # Signals
@@ -2413,10 +2890,22 @@ class MainWindow(QMainWindow):
         ci = self.workspace[p].crop_interval
         xrange = list(ci) if ci else None
 
+        # build a filename-safe step slug for camera-icon saves
+        cfg = self.workspace[p].emg.getProcessConfig()
+        if cfg is not None:
+            step_slug = re.sub(r"[^a-z0-9]+", "_", cfg.getStepStringList()[step].lower()).strip("_")
+        else:
+            step_slug = "step{}".format(step + 1)
+        # sanitize channel name (may contain slashes, spaces, etc.)
+        chan_slug = re.sub(r"[^a-zA-Z0-9]+", "_", chan).strip("_")
+        participant_dir = os.path.join(self.home, p.name)
+
         if prev:
+            widgets.plot_input.set_save_path(participant_dir, "{}_{}__pre".format(chan_slug, step_slug))
             widgets.plot_input.line(x, self.inputBuffer, chan, color=["#7b91d6"], xrange=xrange)
             widgets.plot_input.show()
         if post:
+            widgets.plot_output.set_save_path(participant_dir, "{}_{}".format(chan_slug, step_slug))
             widgets.plot_output.line(x, self.outputBuffer, chan, color=["#e05c5c"], xrange=xrange)
             widgets.plot_output.show()
 
@@ -2524,10 +3013,7 @@ class MainWindow(QMainWindow):
         elif type == emgConfigEnum.SUMMARY:
             widgets.label_23.setText("{:.4f}".format(cfg[step].max))
             widgets.label_25.setText("{:.4f}".format(cfg[step].min))
-            widgets.label_27.setText("{:.4f}".format(cfg[step].med))
-            widgets.label_29.setText("{:.4f}".format(cfg[step].rms))
-            widgets.label_31.setText("{:.4f}".format(cfg[step].ptp))
-            widgets.label_33.setText("{:.4f}".format(cfg[step].zeros))
+            widgets.label_27.setText("{:.6f}".format(cfg[step].iemg))
             self._pipeline_panel.updateSummary(step, cfg[step])
 
     def updateEMGChannelSelectorContent(self):
@@ -2578,25 +3064,45 @@ class MainWindow(QMainWindow):
         # update configuration list
         widgets.listWidget_2.clear()
         widgets.listWidget_2.setSortingEnabled(False)
-        i = 0
-        for key, item in self.workspace.getEMGConfigures().items():
+        for key in self.workspace.getEMGConfigures().keys():
             widgets.listWidget_2.addItem(key)
-            widgets.listWidget_2.item(i).setForeground(Qt.black)
-            i += 1
-        
+        # Do not set per-item foreground — let the widget stylesheet handle colour
+        # so dark/light themes work correctly without a hardcoded Qt.black override.
+
         widgets.listWidget_2.itemSelectionChanged.connect(self.updateBatchProcessButtonState)
         widgets.listWidget_2.itemDoubleClicked.connect(self.onListWidget2ItemDoubleClicked)
+
+    def removeEMGConfig(self):
+        """Delete the selected saved config from the list and the workspace."""
+        selected = widgets.listWidget_2.selectedItems()
+        if not selected:
+            return
+        cfgname = selected[0].text()
+        configs = self.workspace.getEMGConfigures()
+        if cfgname in configs:
+            del configs[cfgname]
+        widgets.listWidget_2.takeItem(widgets.listWidget_2.row(selected[0]))
+        self.saveWorkSpace()
 
     def onListWidget2ItemDoubleClicked(self, item):
         cfgname = item.text()
         configureList = self.workspace.getEMGConfigures()
         config = configureList[cfgname]
-        isSave, cfg = EMGConfigWindow(config).run()
+
+        # Resolve participant first so we can pass the correct fs to the dialog
+        p = self.workspace.getParticipantWithName(
+            self.extract_participant_name_from_configname(cfgname)
+        )
+        try:
+            fs = self.workspace[p].emg.getfs() if p is not None else 2000
+        except Exception:
+            fs = 2000
+
+        isSave, cfg = EMGConfigEditDialog(config, fs, parent=self).run()
 
         if not isSave:
-            return 
+            return
 
-        p = self.workspace.getParticipantWithName(self.extract_participant_name_from_configname(cfgname))
         if p is not None:
             self.workspace[p].emg.setProcessConfig(cfg)
             self.workspace.saveEMGConfigure(p, cfgname)
@@ -2674,12 +3180,23 @@ class MainWindow(QMainWindow):
         self.freqAnalysisPlots.clear()
 
         # Show frequency-safe signal (DC + band-pass only, no envelope, no normalization)
+        # getFreqSafeSegment filters the FULL signal first, then crops — no edge artefacts.
         crop = self.workspace[p].crop_interval
         arr = self.workspace[p].emg.getFreqSafeSegment(channel, crop)
         fs = self.workspace[p].emg.getfs()
-        x = np.linspace(0, len(arr) / fs, len(arr)) if len(arr) > 0 else np.array([])
+        seg_duration = len(arr) / fs if len(arr) > 0 else 0.0
+        seg_start = crop[0] if crop is not None else 0.0
+        seg_end   = seg_start + seg_duration
+        # x-axis in absolute trial time so it matches the Start/End Time fields
+        x = np.linspace(seg_start, seg_end, len(arr)) if len(arr) > 0 else np.array([])
         widgets.freq_timedomain.line(x, arr, channel)
         widgets.freq_timedomain.show()
+
+        # Pre-populate Start / End Time fields with ABSOLUTE trial times.
+        # Users enter times matching the waveform x-axis (e.g. 3.0 → 10.0).
+        widgets.lineEdit_5.setText("{:.4f}".format(seg_start))
+        widgets.lineEdit_4.setText("{:.4f}".format(seg_end))
+
         self.updateFreqAnalysisFFTPanel()
 
     def updateFreqAnalysisFFTPanel(self):
@@ -2722,9 +3239,9 @@ class MainWindow(QMainWindow):
 
     def newWorkSpace(self, fpath, name):
         # create new project
-        # self.workspace = workspace(name)
         self.workspace = workspace(str(fpath), name)
         self.home = str(fpath)
+        self._set_add_emg_enabled(True)
 
         # clear GUI
         self.updateEMGSignalProcessPanel()
@@ -2752,6 +3269,7 @@ class MainWindow(QMainWindow):
         if self.workspace == None:
             return -1
         self.home = self.workspace.fpath
+        self._set_add_emg_enabled(True)
 
         # load workspace file exploer
         self.filesystemTree.setRootPath(self.home)
@@ -3158,38 +3676,51 @@ class MainWindow(QMainWindow):
 
     def addNewFFTtoFreqAnalysisFFTPanel(self):
         p, chan = self.freqAnalysis
+        # tst starts at t=0 (segment-relative); user fields use absolute trial time
         tst = self._get_freq_safe_tst(p, chan)
-        try:
-            left = float(widgets.lineEdit_5.text())
-            right = float(widgets.lineEdit_4.text())
-            # check sanity against freq-safe segment duration
-            if left < 0 or left > tst.time:
-                left = 0.0
-            if right < 0 or right > tst.time:
-                right = float(tst.time)
-        except Exception:
-            left = 0.0
-            right = float(tst.time)
+        crop = self.workspace[p].crop_interval
+        seg_start = crop[0] if crop is not None else 0.0
+        seg_dur   = tst.time
 
-        widgets.lineEdit_5.setText(str(left))
-        widgets.lineEdit_4.setText(str(right))
+        try:
+            left_abs  = float(widgets.lineEdit_5.text())
+            right_abs = float(widgets.lineEdit_4.text())
+        except Exception:
+            left_abs  = seg_start
+            right_abs = seg_start + seg_dur
+
+        # Convert absolute times → segment-relative for fft_db, then clamp
+        left_rel  = max(0.0, min(left_abs  - seg_start, seg_dur))
+        right_rel = max(0.0, min(right_abs - seg_start, seg_dur))
+        if right_rel <= left_rel:
+            left_rel, right_rel = 0.0, seg_dur
+
+        # Write clamped absolute times back so the user sees the accepted window
+        widgets.lineEdit_5.setText("{:.4f}".format(left_rel  + seg_start))
+        widgets.lineEdit_4.setText("{:.4f}".format(right_rel + seg_start))
 
         num_plots = 1
         if widgets.lineEdit_6.text() != "":
-            num_plots = int(widgets.lineEdit_6.text())
+            try:
+                num_plots = max(1, int(widgets.lineEdit_6.text()))
+            except Exception:
+                pass
 
-        curr_time = left
-        step = (right - left) / num_plots
+        curr_rel = left_rel
+        step = (right_rel - left_rel) / num_plots
         for i in range(0, num_plots):
-            title = "Frequency Analysis: {} s to {} s".format(
-                curr_time, curr_time + step
+            t_abs_start = curr_rel + seg_start
+            t_abs_end   = curr_rel + step + seg_start
+            title = "Frequency Analysis: {:.3f} s to {:.3f} s".format(
+                t_abs_start, t_abs_end
             )
             newPlot = self.FreqAnalysisCreateQPlotView(
-                p, chan, curr_time, curr_time + step, title=title
+                p, chan, curr_rel, curr_rel + step,
+                title=title, seg_start=seg_start,
             )
             self.freqAnalysisPlots.append(newPlot)
             widgets.scrollArea_3.append(newPlot)
-            curr_time += step
+            curr_rel += step
         self.updateFreqAnalysisFFTPanel()
 
     def startSingleEMGProcess(self, p):
@@ -3211,6 +3742,7 @@ class MainWindow(QMainWindow):
         cfg = self.workspace[p].emg.getProcessConfig()
         fs = self.workspace[p].emg.getfs()
         self._pipeline_panel.load(cfg, fs)
+        self._emg_action_bar.show()
         # Sync crop widget to trial duration and any previously saved crop interval
         self._sync_crop_widget(p)
         self.selectSingleEMGStep(0)
@@ -3315,6 +3847,12 @@ class MainWindow(QMainWindow):
 
     def _onBatchError(self, msg):
         logger.error("Batch process error: {}".format(msg))
+        QMessageBox.warning(
+            self,
+            self.tr("Batch processing error"),
+            self.tr("A participant failed to process:\n\n{}").format(msg),
+            QMessageBox.Ok,
+        )
 
     # ------------------------------------------------------------------
     # Manual EMG crop

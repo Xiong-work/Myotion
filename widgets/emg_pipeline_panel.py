@@ -171,10 +171,10 @@ class EMGStepCard(QGroupBox):
 
         elif t == emgConfigEnum.SUMMARY:
             self._stat_labels = {}
-            for key in ("max", "min", "med", "rms", "ptp", "zeros"):
+            for key, display in (("max", "MAX"), ("min", "MIN"), ("iemg", "IEMG (V·s)")):
                 val_lbl = QLabel("—")
                 val_lbl.setStyleSheet(_LBL)
-                layout.addLayout(self._row(self._lbl("{}:".format(key.upper())), val_lbl))
+                layout.addLayout(self._row(self._lbl("{}:".format(display)), val_lbl))
                 self._stat_labels[key] = val_lbl
 
         self._building = False
@@ -224,10 +224,7 @@ class EMGStepCard(QGroupBox):
             return
         self._stat_labels["max"].setText("{:.4f}".format(cfg.max))
         self._stat_labels["min"].setText("{:.4f}".format(cfg.min))
-        self._stat_labels["med"].setText("{:.4f}".format(cfg.med))
-        self._stat_labels["rms"].setText("{:.4f}".format(cfg.rms))
-        self._stat_labels["ptp"].setText("{:.4f}".format(cfg.ptp))
-        self._stat_labels["zeros"].setText("{:.4f}".format(cfg.zeros))
+        self._stat_labels["iemg"].setText("{:.6f}".format(cfg.iemg))
 
 
 class EMGPipelinePanel(QWidget):
