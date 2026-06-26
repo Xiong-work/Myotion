@@ -1,5 +1,5 @@
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QVBoxLayout, QInputDialog, QMenu, QTreeWidgetItem
+from PySide6.QtWidgets import QVBoxLayout, QInputDialog, QMenu, QMessageBox, QTreeWidgetItem
 import numpy as np
 import scipy.signal as _sig
 
@@ -8,6 +8,7 @@ from modules.kinematics.playbarwidget import PlayBarWidget
 from modules.kinematics.playplotview import PlayPlotWidget
 from modules.kinematics.renderwidget import RenderWidget
 from modules.pyMotion.core.trial import TrialEvent
+from modules.pyMotion.core.onset_detection import detect_emg_onsets
 
 
 class Controller:
@@ -25,6 +26,8 @@ class Controller:
         bottom: QVBoxLayout,
         labeltree,
         participant_item=None,
+        save_callback=None,
+        export_events_callback=None,
     ) -> None:
         self.model = model
         self.frame = 0
@@ -34,6 +37,8 @@ class Controller:
         self.bottom = bottom
         self.labeltree = labeltree
         self.participant_item = participant_item  # QTreeWidgetItem for the active participant
+        self._save_callback = save_callback
+        self._export_events_callback = export_events_callback
 
         self.render.setModel(model.kinematic)
         self.render.setController(self)
@@ -47,6 +52,13 @@ class Controller:
         self.playbar.nextFrameButton.clicked.connect(self.on_next_frame_button_clicked)
         self.playbar.step.currentTextChanged.connect(self.on_combo_box_changed)
         self.playbar.eventMarkRequested.connect(self._onMarkEvent)
+        self.playbar.exportEventsRequested.connect(self._onExportEvents)
+        self.playbar.onsetDetectionToggled.connect(self._onOnsetDetectionToggled)
+
+        # Cache the last-selected EMG channel so the onset button can act without re-click
+        self._current_emg_channel = None
+        self._current_emg_arr = None
+        self._current_emg_fs = None
         self.step = 1
         self.labeltree.itemDoubleClicked.connect(self.tree_item_select)
 
@@ -142,11 +154,20 @@ class Controller:
             self.top.add_line(np.arange(0, len(ys)), ys, name + ".y", type="marker")
             self.top.add_line(np.arange(0, len(zs)), zs, name + ".z", type="marker")
         if name in self.model.emg.Channels:
-            # EMG data has its own processing pipeline — no additional filtering here
-            x = self.model.emg.getLinspace()
-            y = self.model.emg[name]
+            # Replay the user's pipeline (DC offset, filters, rectification) on the
+            # full raw signal — no crop, no normalization — matching Time Domain analysis.
+            y_arr = self.model.emg.get_kinematics_display(name)
+            fs_emg = self.model.emg.getfs()
+            x = list(np.arange(len(y_arr)) / fs_emg)
             rate = self.model.kinematic.point_fs
-            self.top.add_line(x, y, name, 'channel', rate)
+            self.top.add_line(x, list(y_arr), name, 'channel', rate)
+            # Cache for onset detection button
+            self._current_emg_channel = name
+            self._current_emg_arr = y_arr
+            self._current_emg_fs = fs_emg
+            # If onset detection is already on, run it for the new channel
+            if self.playbar.onsetDetectionButton.isChecked():
+                self._run_onset_detection(name, y_arr, fs_emg)
         # Force plate channel click — plot the selected component over time
         if name in self._force_channels:
             fp, attr = self._force_channels[name]
@@ -190,6 +211,102 @@ class Controller:
     # Event creation / deletion
     # ------------------------------------------------------------------
 
+    def _run_onset_detection(self, chan, y_arr, fs_emg):
+        """Run TKE onset detection for *chan*, update events and plot."""
+        crop_start = None
+        ci = getattr(self.model.profile, 'crop_interval', None)
+        if ci is not None:
+            crop_start = ci[0]
+
+        try:
+            pairs = detect_emg_onsets(y_arr, fs_emg, crop_start_s=crop_start)
+        except Exception:
+            return
+
+        # Remove previous detection events for this channel before adding new ones
+        on_prefix  = "Onset_" + chan
+        off_prefix = "Offset_" + chan
+        stale = [e for e in self.model.extra_events
+                 if e.label.startswith(on_prefix) or e.label.startswith(off_prefix)]
+        for e in stale:
+            self.model.extra_events.remove(e)
+            if e in self.model.events:
+                self.model.events.remove(e)
+
+        if not pairs:
+            self._refresh_event_tree()
+            return
+
+        # Add new detection TrialEvents
+        multi = len(pairs) > 1
+        for i, (t_on, t_off) in enumerate(pairs):
+            suffix = " #{}".format(i + 1) if multi else ""
+            on_ev  = TrialEvent(t_on,  "Onset_{}{}" .format(chan, suffix), "Detection")
+            off_ev = TrialEvent(t_off, "Offset_{}{}".format(chan, suffix), "Detection")
+            self.model.extra_events.append(on_ev)
+            self.model.extra_events.append(off_ev)
+            self.model.events.append(on_ev)
+            self.model.events.append(off_ev)
+        self.model.events.sort(key=lambda e: e.time_s)
+
+        self._refresh_event_tree()
+        self.top.add_onset_offset(
+            [p[0] for p in pairs],
+            [p[1] for p in pairs],
+        )
+        if self._save_callback:
+            self._save_callback()
+
+    def _onOnsetDetectionToggled(self, checked):
+        if not checked:
+            # Turning off — clear lines and remove detection events for current channel
+            self.top.clear_onset_offset()
+            if self._current_emg_channel is not None:
+                prefix_on  = "Onset_"  + self._current_emg_channel
+                prefix_off = "Offset_" + self._current_emg_channel
+                stale = [e for e in self.model.extra_events
+                         if e.label.startswith(prefix_on) or e.label.startswith(prefix_off)]
+                for e in stale:
+                    self.model.extra_events.remove(e)
+                    if e in self.model.events:
+                        self.model.events.remove(e)
+                if stale:
+                    self._refresh_event_tree()
+            return
+
+        # Turning on — validate then run
+        if self._current_emg_channel is None:
+            QMessageBox.warning(
+                None,
+                self.labeltree.tr("Onset Detection"),
+                self.labeltree.tr("Select an EMG channel in the tree first."),
+            )
+            self.playbar.onsetDetectionButton.setChecked(False)
+            return
+
+        if not self.model.emg.is_envelope_configured():
+            QMessageBox.warning(
+                None,
+                self.labeltree.tr("Onset Detection"),
+                self.labeltree.tr(
+                    "Onset detection requires a linear envelope pipeline.\n\n"
+                    "Enable Rectification and a Low-Pass filter in the EMG "
+                    "Time Domain configuration, then re-process."
+                ),
+            )
+            self.playbar.onsetDetectionButton.setChecked(False)
+            return
+
+        self._run_onset_detection(
+            self._current_emg_channel,
+            self._current_emg_arr,
+            self._current_emg_fs,
+        )
+
+    def _onExportEvents(self):
+        if self._export_events_callback:
+            self._export_events_callback()
+
     def _onMarkEvent(self):
         """Create a new TrialEvent at the current playback position."""
         fps = self.model.kinematic_frame_rate()
@@ -221,6 +338,8 @@ class Controller:
         self.model.events.sort(key=lambda e: e.time_s)
         self.top.add_event(event)
         self._refresh_event_tree()
+        if self._save_callback:
+            self._save_callback()
 
     def _delete_event(self, event):
         """Remove an event from the model and the plot."""
@@ -230,6 +349,8 @@ class Controller:
             self.model.events.remove(event)
         self.top.remove_event(event)
         self._refresh_event_tree()
+        if self._save_callback:
+            self._save_callback()
 
     def _refresh_event_tree(self):
         """Rebuild the 'Events' node inside the participant's tree item."""
@@ -279,6 +400,8 @@ class Controller:
                 if action == clear_action:
                     self.model.profile.crop_interval = None
                     self._refresh_crop_display()
+                    if self._save_callback:
+                        self._save_callback()
             return
 
         # Right-click on event items
@@ -316,6 +439,8 @@ class Controller:
             t_end = self.model.total_time()
         self.model.profile.crop_interval = (t_start, t_end)
         self._refresh_crop_display()
+        if self._save_callback:
+            self._save_callback()
 
     def _set_crop_end(self, t_end):
         """Set crop end to t_end; keeps existing start or defaults to 0."""
@@ -326,6 +451,8 @@ class Controller:
             t_start = 0.0
         self.model.profile.crop_interval = (t_start, t_end)
         self._refresh_crop_display()
+        if self._save_callback:
+            self._save_callback()
 
     def _refresh_crop_display(self):
         """Add or update the Crop node under the participant tree item."""

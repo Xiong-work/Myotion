@@ -1,17 +1,21 @@
 import pyqtgraph as pg
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 
 
-_EVENT_PEN = pg.mkPen(color="#ffa500", width=1)
+_EVENT_PEN  = pg.mkPen(color="#ffa500", width=1)
+_ONSET_PEN  = pg.mkPen(color="#55cc77", width=1.2, style=Qt.PenStyle.DashLine)
+_OFFSET_PEN = pg.mkPen(color="#cc77cc", width=1.2, style=Qt.PenStyle.DashLine)
 
 
 class PlayPlotWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.lo = QVBoxLayout()
-        self.playline = []     # {line: InfiniteLine, rate: float} — playback cursor per plot
-        self._plot_refs = []   # {widget: PlotWidget, rate: float} — track for event placement
+        self.playline = []        # {line: InfiniteLine, rate: float} — playback cursor per plot
+        self._plot_refs = []      # {widget: PlotWidget, rate: float} — track for event placement
         self._event_markers = []  # {event: TrialEvent, items: [(widget, InfiniteLine)…]}
+        self._onset_markers = []  # (widget, InfiniteLine) for onset/offset detection lines
         self.setLayout(self.lo)
         self.pen = pg.mkPen(color="#586cdb", width=2)
 
@@ -96,6 +100,31 @@ class PlayPlotWidget(QWidget):
                     pass
         self._event_markers.clear()
 
+    def clear_onset_offset(self):
+        """Remove onset/offset dashed lines from all plots without clearing the plots."""
+        for plt, line in self._onset_markers:
+            try:
+                plt.removeItem(line)
+            except Exception:
+                pass
+        self._onset_markers.clear()
+
+    def add_onset_offset(self, onset_times_s, offset_times_s):
+        """Draw dashed onset (green) and offset (purple) lines on all active plots.
+
+        Times are in seconds, matching the EMG x-axis produced by
+        np.arange(len(signal)) / fs.  Lines are tracked in _onset_markers
+        and removed automatically by clear().
+        """
+        for t in onset_times_s:
+            for pr in self._plot_refs:
+                line = pr['widget'].addLine(x=t, pen=_ONSET_PEN)
+                self._onset_markers.append((pr['widget'], line))
+        for t in offset_times_s:
+            for pr in self._plot_refs:
+                line = pr['widget'].addLine(x=t, pen=_OFFSET_PEN)
+                self._onset_markers.append((pr['widget'], line))
+
     def clear(self):
         """Remove all plots and reset tracking state."""
         while self.lo.count():
@@ -106,3 +135,4 @@ class PlayPlotWidget(QWidget):
         self.playline.clear()
         self._plot_refs.clear()
         self._event_markers.clear()
+        self._onset_markers.clear()

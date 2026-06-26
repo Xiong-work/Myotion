@@ -846,6 +846,55 @@ class emg:
             tst[chan] = self.__tryConfigStepImpl(tst, chan, i, crop_interval)
         return tst[chan]
 
+    # Steps that must not be applied for inspection display (analysis-only).
+    _DISPLAY_SKIP = frozenset({
+        emgConfigEnum.NORMALIZATION,
+        emgConfigEnum.ACTIVATION,
+        emgConfigEnum.SUMMARY,
+    })
+
+    def is_envelope_configured(self):
+        """Return True when the pipeline has rectification followed by an enabled LP filter.
+
+        This combination produces a linear envelope, which is the required input
+        for TKE-based onset/offset detection.
+        """
+        if self.processCFG is None:
+            return False
+        rect_seen = False
+        for i in range(self.processCFG.size()):
+            cfg = self.processCFG[i]
+            if cfg.id == emgConfigEnum.FULL_W_RECT and getattr(cfg, 'enable', False):
+                rect_seen = True
+            elif rect_seen and cfg.id == emgConfigEnum.FILTER:
+                if (getattr(cfg, 'enable', False) and
+                        int(getattr(cfg, 'type', -1)) == int(emgFilterEnum.LOW_PASS)):
+                    return True
+        return False
+
+    def get_kinematics_display(self, chan):
+        """Return the full-trial preprocessed signal suitable for kinematics inspection.
+
+        Replays every enabled pipeline step from processCFG that is NOT
+        normalization / activation / summary, starting from rawTST and using
+        no crop interval.  This mirrors what the user configured in the Time
+        Domain analysis without any analysis-specific scaling or cropping.
+
+        Falls back to the raw signal when processCFG has not been set yet.
+        """
+        src = self.rawTST if self.rawTST is not None else self.emgTST
+        if src is None or chan not in (getattr(src, 'labels', None) or []):
+            return np.array([])
+        if self.processCFG is None:
+            return np.asarray(src[chan], dtype=float)
+        tst = src.copy()
+        for i in range(self.processCFG.size()):
+            step_type, _ = self.processCFG.getTypeInfo(i)
+            if step_type in self._DISPLAY_SKIP:
+                continue
+            tst[chan] = self.__tryConfigStepImpl(tst, chan, i, crop_interval=None)
+        return np.asarray(tst[chan], dtype=float)
+
     # process EMG and MVC using configure file
     def processWithConfigure(self, crop_interval=None):
         for chan in self.Channels:

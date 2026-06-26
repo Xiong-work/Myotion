@@ -225,7 +225,9 @@ PauseIcon = ":/icons/images/icons/cil-media-pause.png"
 
 
 class PlayBarWidget(QWidget):
-    eventMarkRequested = Signal()  # emitted when user clicks "Mark Event"
+    eventMarkRequested = Signal()       # emitted when user clicks "Mark Event"
+    exportEventsRequested = Signal()    # emitted when user clicks "Export Events"
+    onsetDetectionToggled = Signal(bool)  # emitted with new checked state when toggled
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -269,10 +271,22 @@ class PlayBarWidget(QWidget):
         self.markEventButton.setStyleSheet(buttonStyle)
         self.markEventButton.clicked.connect(self.eventMarkRequested)
 
+        self.exportEventsButton = QPushButton(self.tr("Export Events"), self.button_group)
+        self.exportEventsButton.setStyleSheet(buttonStyle)
+        self.exportEventsButton.clicked.connect(self.exportEventsRequested)
+
         self.filterCheck = QPushButton(self.tr("Filter"), self.button_group)
         self.filterCheck.setCheckable(True)
         self.filterCheck.setChecked(True)  # filtering on by default
         self.filterCheck.setStyleSheet(buttonStyle)
+
+        self.onsetDetectionButton = QPushButton(self.tr("Onset Detection"), self.button_group)
+        self.onsetDetectionButton.setCheckable(True)
+        self.onsetDetectionButton.setChecked(False)
+        self.onsetDetectionButton.setStyleSheet(buttonStyle)
+        self.onsetDetectionButton.clicked.connect(
+            lambda checked: self.onsetDetectionToggled.emit(checked)
+        )
 
         hboxlayout = QHBoxLayout(self.button_group)
         hboxlayout.addStretch()
@@ -281,7 +295,9 @@ class PlayBarWidget(QWidget):
         hboxlayout.addWidget(self.nextFrameButton)
         hboxlayout.addWidget(self.step)
         hboxlayout.addWidget(self.markEventButton)
+        hboxlayout.addWidget(self.exportEventsButton)
         hboxlayout.addWidget(self.filterCheck)
+        hboxlayout.addWidget(self.onsetDetectionButton)
         hboxlayout.addStretch()
         vboxlayout.addWidget(self.slider)
         vboxlayout.addWidget(self.current_frame_label)

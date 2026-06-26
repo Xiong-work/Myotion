@@ -24,9 +24,11 @@ class ForceVectorItem(Mesh):
     def __init__(self, fx: float, fy: float, fz: float, origin=None):
         if origin is None:
             origin = [0.0, 2.0, 0.0]
+        # Negate only Fz: C3D stores vertical force as body-on-plate (downward),
+        # so negating gives the GRF (plate-on-body, upward). Fx/Fy sign is already correct.
         tip = [
             origin[0] + fx * _GRF_SCALE,
-            origin[1] + fz * _GRF_SCALE,
+            origin[1] - fz * _GRF_SCALE,
             origin[2] + fy * _GRF_SCALE,
         ]
         color = [1.0, 0.5, 0.0]  # orange

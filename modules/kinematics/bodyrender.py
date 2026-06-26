@@ -28,6 +28,7 @@ class BodyRender(Base):
         self.point = None
         self._plate_geo = []       # ForceWireItem instances currently in scene
         self._plate_geo_added = False  # deferred first-paint flag
+        self._press_pos = None     # (x, y) at mouse-press, for click-vs-drag
         # Branding watermark — loaded once, rendered each frame at low opacity
         _raw = QPixmap(_WATERMARK_PATH)
         self._watermark = (
@@ -39,6 +40,9 @@ class BodyRender(Base):
         super().initializeGL()
         self.currentFrame = 0
         self._force_items = []  # ForceVectorItem list, one per active force plate
+        self._selected_marker = None          # name of currently selected marker
+        self._current_labels = []             # label list matching last getFrame() order
+        self._current_positions_scene = []    # scene-space positions matching _current_labels
         self.renderer = Renderer(self)
         self.scene = Object3D()
         self.camera = Camera(aspectRatio=1, far=50000)
@@ -120,20 +124,24 @@ class BodyRender(Base):
             return None
 
     def getFrame(self):
-        cf = []
+        labels, positions, colors = [], [], []
+        sel = getattr(self, "_selected_marker", None)
         for joint in self.model.realpoints:
-            cf.append(
-                [
-                    self.model.realpoints[joint][self.currentFrame].xyz[0],
-                    self.model.realpoints[joint][self.currentFrame].xyz[2],
-                    self.model.realpoints[joint][self.currentFrame].xyz[1],
-                ]
-            )
-        return PointItem(cf)
+            pt = self.model.realpoints[joint][self.currentFrame]
+            scene_pos = [pt.xyz[0], pt.xyz[2], pt.xyz[1]]
+            labels.append(joint)
+            positions.append(scene_pos)
+            colors.append([1.0, 0.85, 0.0] if joint == sel else [1.0, 1.0, 1.0])
+        self._current_labels = labels
+        self._current_positions_scene = positions
+        return PointItem(positions, colors)
 
     def setModel(self, model):
         self.model = model
         self.currentFrame = 0
+        self._selected_marker = None
+        self._current_labels = []
+        self._current_positions_scene = []
         # Clear stale plate wireframes so the next paintGL re-adds them for the new model
         if hasattr(self, "scene"):
             for wire in self._plate_geo:
@@ -142,32 +150,79 @@ class BodyRender(Base):
         self._plate_geo = []
         self._plate_geo_added = False
 
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        self._press_pos = (event.x(), event.y())
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if self._press_pos is not None:
+            dx = event.x() - self._press_pos[0]
+            dy = event.y() - self._press_pos[1]
+            if dx * dx + dy * dy < 25:  # < 5 px movement → click, not drag
+                self._handle_pick(event.x(), event.y())
+        self._press_pos = None
+
+    def _handle_pick(self, sx, sy):
+        """Select the nearest marker to screen position (sx, sy), or deselect."""
+        if not self._current_labels:
+            return
+        _THRESHOLD_SQ = 15 * 15
+        best_idx, best_d2 = None, _THRESHOLD_SQ
+        for i, scene_pos in enumerate(self._current_positions_scene):
+            proj = self._project_to_screen(scene_pos)
+            if proj is None:
+                continue
+            d2 = (proj[0] - sx) ** 2 + (proj[1] - sy) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                best_idx = i
+        if best_idx is None:
+            self._selected_marker = None
+        else:
+            name = self._current_labels[best_idx]
+            # toggle: clicking the same marker again deselects it
+            self._selected_marker = None if self._selected_marker == name else name
+
     def setFrame(self, frame):
         self.currentFrame = frame
 
     def paintEvent(self, event):
-        """GL rendering (via super) then QPainter overlay for force plate labels."""
+        """GL rendering (via super) then QPainter overlay for labels."""
         super().paintEvent(event)
         if not hasattr(self, "camera") or self.model is None:
             return
         fps = getattr(self.model, "force_plates", [])
-        if not fps:
+        sel = getattr(self, "_selected_marker", None)
+        if not fps and not sel:
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QColor(0, 200, 200))
-        font = QFont("Segoe UI", 9)
-        font.setBold(True)
-        painter.setFont(font)
-        for fp in fps:
-            if fp.corners is None:
-                continue
-            c = fp.corners.mean(axis=0)
-            # Map C3D lab frame → scene coords (same as getFrame / ForceWireItem)
-            scene_center = [float(c[0]), float(c[2]), float(c[1])]
-            pos = self._project_to_screen(scene_center)
-            if pos:
-                painter.drawText(pos[0] + 6, pos[1], "Plate {}".format(fp.plate_id))
+        # Force plate labels (cyan)
+        if fps:
+            fp_font = QFont("Segoe UI", 9)
+            fp_font.setBold(True)
+            painter.setFont(fp_font)
+            painter.setPen(QColor(0, 200, 200))
+            for fp in fps:
+                if fp.corners is None:
+                    continue
+                c = fp.corners.mean(axis=0)
+                scene_center = [float(c[0]), float(c[2]), float(c[1])]
+                pos = self._project_to_screen(scene_center)
+                if pos:
+                    painter.drawText(pos[0] + 6, pos[1], "Plate {}".format(fp.plate_id))
+        # Selected marker label (yellow)
+        labels = getattr(self, "_current_labels", [])
+        positions = getattr(self, "_current_positions_scene", [])
+        if sel and sel in labels:
+            idx = labels.index(sel)
+            proj = self._project_to_screen(positions[idx])
+            if proj:
+                mk_font = QFont("Segoe UI", 9, QFont.Weight.Bold)
+                painter.setFont(mk_font)
+                painter.setPen(QColor(255, 220, 0))
+                painter.drawText(proj[0] + 8, proj[1] - 4, sel)
         painter.end()
 
     def _project_to_screen(self, scene_pos):

@@ -2603,6 +2603,95 @@ class MainWindow(QMainWindow):
         widgets.scrollArea_3.deleteAllPages()
         self.updateFreqAnalysisFFTPanel()
 
+    def _exportParticipantEvents(self, p):
+        """Export events and detection results to <workspace>/<name>/<name>_Events.csv.
+
+        Layout:
+          Section 1 — user / C3D events (Time, Label), sorted by time.
+          Section 2 — onset/offset detection results grouped by muscle,
+                       showing paired (Onset, Offset) on each row.
+        """
+        import csv as _csv
+        import re as _re
+        from datetime import datetime as _dt
+
+        profile = self.workspace[p]
+        all_events = sorted(
+            list(getattr(profile.kinematic, "events", [])) +
+            list(getattr(profile, "extra_events", [])),
+            key=lambda e: e.time_s,
+        )
+
+        # Split into named events and auto-detection events
+        named_events = [e for e in all_events if e.context != "Detection"]
+        detect_events = [e for e in all_events if e.context == "Detection"]
+
+        if not named_events and not detect_events:
+            QMessageBox.information(
+                self, self.tr("Export Events"),
+                self.tr("No events to export for {}.".format(p.name)),
+                QMessageBox.Ok,
+            )
+            return
+
+        # Parse detection events into {muscle: {activation_num: {onset|offset: time_s}}}
+        _DET_RE = _re.compile(r'^(Onset|Offset)_(.+?)(?:\s+#(\d+))?$')
+        detection_map = {}
+        for ev in detect_events:
+            m = _DET_RE.match(ev.label)
+            if not m:
+                continue
+            kind   = m.group(1).lower()   # "onset" or "offset"
+            muscle = m.group(2)
+            num    = int(m.group(3)) if m.group(3) else 1
+            detection_map.setdefault(muscle, {}).setdefault(num, {})[kind] = round(ev.time_s, 4)
+
+        participant_dir = os.path.join(self.home, p.name)
+        os.makedirs(participant_dir, exist_ok=True)
+        out_path = os.path.join(participant_dir, "{}_Events.csv".format(p.name))
+
+        try:
+            with open(out_path, "w", newline="", encoding="utf-8") as f:
+                f.write("# Participant: {}\n".format(p.name))
+                f.write("# Exported: {}\n".format(_dt.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+                # --- Section 1: named events ---
+                if named_events:
+                    f.write("#\n# Events\n")
+                    w = _csv.DictWriter(f, fieldnames=["Time (s)", "Label"])
+                    w.writeheader()
+                    for ev in named_events:
+                        w.writerow({"Time (s)": round(ev.time_s, 4), "Label": ev.label})
+
+                # --- Section 2: detection results grouped by muscle ---
+                if detection_map:
+                    f.write("#\n# Onset/Offset Detection\n")
+                    w = _csv.DictWriter(
+                        f, fieldnames=["Muscle", "Activation", "Onset (s)", "Offset (s)"]
+                    )
+                    w.writeheader()
+                    for muscle in sorted(detection_map):
+                        for num in sorted(detection_map[muscle]):
+                            pair = detection_map[muscle][num]
+                            w.writerow({
+                                "Muscle":      muscle,
+                                "Activation":  num,
+                                "Onset (s)":   pair.get("onset", ""),
+                                "Offset (s)":  pair.get("offset", ""),
+                            })
+
+            QMessageBox.information(
+                self, self.tr("Export Events"),
+                self.tr("Events saved to:\n{}".format(out_path)),
+                QMessageBox.Ok,
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self, self.tr("error"),
+                self.tr("Failed to export events: {}".format(str(e))),
+                QMessageBox.Ok,
+            )
+
     def exportFreqAnalysisCSV(self):
         p, _ = self.freqAnalysis
         if p is None:
@@ -3305,16 +3394,27 @@ class MainWindow(QMainWindow):
             k = person.kinematic
             if not k.isValid():
                 continue
-            for point in k.reallabels:
-                tr = QTreeWidgetItem(treeItem)
+            # Markers group
+            marker_labels = k.reallabels
+            marker_group = QTreeWidgetItem(treeItem)
+            marker_group.setText(0, "Markers ({})".format(len(marker_labels)))
+            for point in marker_labels:
+                tr = QTreeWidgetItem(marker_group)
                 tr.setFlags(tr.flags() | Qt.ItemIsDragEnabled | Qt.ItemIsSelectable)
                 tr.setText(0, point)
-                treeItem.addChild(tr)
-            for c in emg.getChannels():
-                treeItem2 = QTreeWidgetItem(treeItem)
-                treeItem2.setText(0, c)
-                treeItem.addChild(treeItem2)
-            # Force plate channels — nested under the participant, grouped by plate
+            marker_group.setExpanded(False)
+            treeItem.addChild(marker_group)
+            # EMG group
+            emg_channels = emg.getChannels()
+            if emg_channels:
+                emg_group = QTreeWidgetItem(treeItem)
+                emg_group.setText(0, "EMG ({})".format(len(emg_channels)))
+                for c in emg_channels:
+                    ch_node = QTreeWidgetItem(emg_group)
+                    ch_node.setText(0, c)
+                emg_group.setExpanded(False)
+                treeItem.addChild(emg_group)
+            # Force Plates group
             if k.force_plates:
                 fp_group = QTreeWidgetItem(treeItem)
                 fp_group.setText(0, "Force Plates ({})".format(len(k.force_plates)))
@@ -3326,6 +3426,26 @@ class MainWindow(QMainWindow):
                         comp_node.setText(0, "Plate{} {}".format(fp.plate_id, comp))
                 fp_group.setExpanded(False)
                 treeItem.addChild(fp_group)
+            # Events group — C3D events from kinematic + user-created events from profile
+            extra_evs = getattr(person, "extra_events", [])
+            c3d_evs = getattr(k, "events", [])
+            all_events = sorted(list(c3d_evs) + list(extra_evs), key=lambda e: e.time_s)
+            if all_events:
+                ev_group = QTreeWidgetItem(treeItem)
+                ev_group.setText(0, "Events ({})".format(len(all_events)))
+                for ev in all_events:
+                    source = "" if ev in extra_evs else " [C3D]"
+                    ch = QTreeWidgetItem(ev_group)
+                    ch.setText(0, "{} | {} | {:.3f}s{}".format(
+                        ev.label, ev.context, ev.time_s, source))
+                ev_group.setExpanded(False)
+                treeItem.addChild(ev_group)
+            # Crop node — if a crop interval is saved for this participant
+            ci = getattr(person, "crop_interval", None)
+            if ci is not None:
+                crop_node = QTreeWidgetItem(treeItem)
+                crop_node.setText(0, "Crop: {:.3f} s → {:.3f} s".format(ci[0], ci[1]))
+                treeItem.addChild(crop_node)
 
         tree.itemDoubleClicked.connect(self.loadKinemtic)
         tree.setHeaderItem(QTreeWidgetItem(["Participant"]))
@@ -3656,8 +3776,11 @@ class MainWindow(QMainWindow):
         self.model = Model(self.workspace[p])
         top = widgets.graph_top
         top.setModel(self.model, widgets.kinematics_label_tree)
-        # bottom = widgets.graph_bottom
-        # bottom.setModel(self.model, widgets.kinematics_label_tree)
+        # Remove pre-populated Events and Crop nodes — Controller will rebuild them live
+        for i in range(item.childCount() - 1, -1, -1):
+            txt = item.child(i).text(0)
+            if txt.startswith("Events") or txt.startswith("Crop:"):
+                item.removeChild(item.child(i))
         Controller(
             self.model,
             widgets.renderWidget,
@@ -3666,6 +3789,8 @@ class MainWindow(QMainWindow):
             None,
             widgets.kinematics_label_tree,
             participant_item=item,
+            save_callback=lambda: self.saveProjectButtonClick(show=False),
+            export_events_callback=lambda: self._exportParticipantEvents(p),
         )
 
     def preloadFreqAnalysisPage(self):
