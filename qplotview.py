@@ -127,11 +127,20 @@ class QPlotView(QWebEngineView):
         self._save_dir = None
         self._save_name = None
 
-        # create new profile
-        self.profile = QWebEngineProfile(parent)
+        # Profile has NO Qt parent — its lifetime is managed by Python's reference
+        # count on self.profile.  This guarantees the destruction order:
+        #   1. Qt destroys the view → deletes its Qt children (page, reparented
+        #      here by setPage) → page is removed from the profile's page list.
+        #   2. Python releases the view wrapper → self.profile refcount hits 0
+        #      → profile C++ object is deleted → page list is already empty
+        #      → no "Release of profile requested but WebEnginePage still not
+        #         deleted" warning.
+        # The scheme handler is parented to the profile so it is always alive
+        # while the profile is alive (Qt docs require handler to outlive profile).
+        self.profile = QWebEngineProfile()
 
-        # install handler
-        self.schemeHandler = UrlSchemeHandler(self)
+        # install handler — parent = profile, not self
+        self.schemeHandler = UrlSchemeHandler(self.profile)
         self.schemeHandler.setHtml("<html><body></body></html>")
         self.profile.installUrlSchemeHandler(
             bytes(URL_SCHEME, "ascii"), self.schemeHandler
@@ -140,9 +149,9 @@ class QPlotView(QWebEngineView):
         # redirect Plotly camera-icon downloads to the participant folder
         self.profile.downloadRequested.connect(self._on_download_requested)
 
-        # create new page
-        self.page = QWebEnginePage(self.profile, parent)
-        self.setPage(self.page)
+        # create new page with no Qt parent; setPage() reparents it into self
+        self._page = QWebEnginePage(self.profile)
+        self.setPage(self._page)
 
         # set URL
         self.url = QUrl("any_url_works_to_trigger_handler")

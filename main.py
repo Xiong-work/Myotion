@@ -4034,10 +4034,33 @@ class MainWindow(QMainWindow):
 
 
     def closeEvent(self, event):  # Window close event handler.
-        # Explicitly destroy all QPlotView instances.
+        # ── Qt WebEngine teardown fix ──────────────────────────────────────
+        # Profiles for QPlotView / StatsChartView have no Qt parent (lifetime
+        # is controlled by the Python wrapper's refcount).  During Python
+        # shutdown the global `widgets` object is released, which releases the
+        # Python wrappers — and with them `self.profile` — before Qt has had a
+        # chance to destroy the C++ page objects that are still registered with
+        # those profiles.  The result is the "Release of profile requested but
+        # WebEnginePage still not deleted" warning.
+        #
+        # Fix: while the event loop is still running, replace each custom-
+        # profile page with a blank default-profile page, detach and schedule
+        # the old page for immediate deletion, then flush deleteLater().
+        # The profile tracking list is empty by the time Python GC runs.
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+        default_profile = QWebEngineProfile.defaultProfile()
+        for view in self.findChildren(QWebEngineView):
+            old_page = view.page()
+            if old_page is None or old_page.profile() is default_profile:
+                continue
+            view.setPage(QWebEnginePage(view))  # give view a safe default page
+            old_page.setParent(None)            # detach from Qt tree
+            old_page.deleteLater()              # schedule immediate C++ deletion
+        QApplication.processEvents()            # flush — pages are deleted now
+        # ──────────────────────────────────────────────────────────────────
+
         self.deletePlots()
-        # clean up app when closed
-        # logout
         self.logout_click()
         event.accept()
 
