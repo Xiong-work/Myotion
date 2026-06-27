@@ -2204,15 +2204,8 @@ class Ui_MainWindow(object):
         self.page_3_filter.setObjectName("page_3_filter")
         self.page_3_filter.setGeometry(QRect(0, 0, 157, 286))
         self.page_3_filter.setStyleSheet(
-            "QScrollBar::handle:vertical{ \n"
-            "    background: #353a45;\n"
-            "    visible:none;\n"
-            "}\n"
-            "\n"
-            "QScrollBar::handle:horizontal{ \n"
-            "    background: #353a45;\n"
-            "	visible:none;\n"
-            "   }"
+            "QScrollBar::handle:vertical{ background: #353a45; }"
+            "QScrollBar::handle:horizontal{ background: #353a45; }"
         )
         self.verticalLayout_43 = QVBoxLayout(self.page_3_filter)
         self.verticalLayout_43.setSpacing(0)

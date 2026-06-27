@@ -54,11 +54,14 @@ class StatsChartView(QWebEngineView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._profile = QWebEngineProfile(self)
-        self._handler = _HtmlSchemeHandler(self)
-        # "local" scheme is registered globally in QPlotViewSetup() at startup
+        # No Qt parent for profile — Python reference-counting controls its
+        # lifetime.  Handler parented to profile (must outlive the profile).
+        # setPage() reparents the page into self's Qt child tree, so page is
+        # destroyed before the profile when the view is torn down.
+        self._profile = QWebEngineProfile()
+        self._handler = _HtmlSchemeHandler(self._profile)
         self._profile.installUrlSchemeHandler(b"local", self._handler)
-        page = QWebEnginePage(self._profile, self)
+        page = QWebEnginePage(self._profile)
         self.setPage(page)
         self._url = QUrl("local://stats-chart")
         self.show_placeholder("Assign participants to groups, then select a metric.")
