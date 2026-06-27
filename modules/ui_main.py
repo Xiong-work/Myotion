@@ -706,7 +706,7 @@ class Ui_MainWindow(object):
         self.btn_start.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_start.setLayoutDirection(Qt.LeftToRight)
         self.btn_start.setStyleSheet(
-            "background-image: url(:/icons/images/icons/cil-home.png);"
+            "background-image: url(:/icons/images/icons/cil-home-bold.png);"
         )
 
         self.verticalLayout_8.addWidget(self.btn_start)
@@ -752,7 +752,7 @@ class Ui_MainWindow(object):
         self.btn_frequency.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_frequency.setLayoutDirection(Qt.LeftToRight)
         self.btn_frequency.setStyleSheet(
-            "background-image: url(:/icons/images/icons/cil-equalizer.png);"
+            "background-image: url(:/icons/images/icons/Freq_icon_nav.png);"
         )
 
         self.verticalLayout_8.addWidget(self.btn_frequency)
@@ -766,7 +766,7 @@ class Ui_MainWindow(object):
         self.btn_advanced.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_advanced.setLayoutDirection(Qt.LeftToRight)
         self.btn_advanced.setStyleSheet(
-            "background-image: url(:/icons/images/icons/cil-signal-cellular-3.png)"
+            "background-image: url(:/icons/images/icons/icon-adv-module.png);"
         )
 
         self.verticalLayout_8.addWidget(self.btn_advanced)
@@ -780,7 +780,7 @@ class Ui_MainWindow(object):
         self.btn_stats.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_stats.setLayoutDirection(Qt.LeftToRight)
         self.btn_stats.setStyleSheet(
-            "background-image: url(:/icons/images/icons/cil-chart.png);"
+            "background-image: url(:/icons/images/icons/icon-stats-nav.png);"
         )
 
         self.verticalLayout_8.addWidget(self.btn_stats)
