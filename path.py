@@ -27,8 +27,5 @@ def initializeAppDataFolder():
 def getSyslogFilename(LogPath):
     return os.path.join(LogPath, 'sys_'+datetime.datetime.now().strftime("%H_%M_%b_%d_%Y"))
 
-def getRserverlogFilename(LogPath):
-    return os.path.join(LogPath, 'rserver_'+datetime.datetime.now().strftime("%H_%M_%b_%d_%Y"))
-
 def checkValidPath(fpath):
     return os.path.exists(fpath)

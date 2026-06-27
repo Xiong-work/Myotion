@@ -42,7 +42,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWebEngineCore import QWebEngineUrlScheme
 
-from rserver import RServer
 from miscWidgets import *
 from path import *
 from qplotview import QPlotView
@@ -964,13 +963,10 @@ class MainWindow(QMainWindow):
     sigUpdateParticipants = Signal()
     sigAsyncLoadError = Signal(str)
 
-    def __init__(self, language, sys_log, r_log):
+    def __init__(self, language, sys_log):
         QMainWindow.__init__(self)
 
         self.language = language
-        # Launch R server
-        self.rserver = RServer(language, r_log)
-        self.rserver.start()
 
         # SET AS GLOBAL WIDGETS
         # ///////////////////////////////////////////////////////////////
@@ -3343,8 +3339,7 @@ class MainWindow(QMainWindow):
         # auto save
         self.enableAutoSave(True)
 
-        # notify rserver
-        self.rserver.UpdateProjectPath(self.home)
+        widgets.stats_page.on_workspace_changed(self.home)
         return 0
 
     def saveWorkSpace(self):
@@ -3375,8 +3370,7 @@ class MainWindow(QMainWindow):
         # auto save
         self.enableAutoSave(True)
 
-        # notify rserver
-        self.rserver.UpdateProjectPath(self.home)
+        widgets.stats_page.on_workspace_changed(self.home)
         return 0
 
     def populateKinematicTree(self, tree: QTreeWidget, participants):
@@ -4099,7 +4093,6 @@ if __name__ == "__main__":
 
     # setup logfile
     sys_log = open(getSyslogFilename(LogPath), 'w', encoding="utf-8")
-    r_log = open(getRserverlogFilename(LogPath), 'w', encoding="utf-8")
     logger.pipe = sys_log
 
     # argument parse
@@ -4119,10 +4112,7 @@ if __name__ == "__main__":
         if translator.load(":/qm/CN.qm"):
             qApp.installTranslator(translator)
 
-    window = MainWindow(language, sys_log, r_log)
+    window = MainWindow(language, sys_log)
     exit_code = qApp.exec()
-    window.rserver.shutdown()
-    window.rserver.join()
     sys_log.close()
-    r_log.close()
     sys.exit(exit_code)

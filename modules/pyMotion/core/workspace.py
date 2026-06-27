@@ -316,6 +316,48 @@ class workspace:
                 f.write(header)
                 emgdf.to_csv(f, index=False)
 
+            # Per-channel summary metrics — one row per channel, all 13 TD metrics.
+            # Written at report-save time so the Stats module can load them instantly
+            # without reprocessing the full signal.
+            import scipy.stats as _ss
+            import pandas as _pd
+            _summary_rows = []
+            for _col in enabled_chans:
+                _arr = emgdf[_col].to_numpy(dtype=float)
+                if len(_arr) == 0:
+                    continue
+                _zc = int(np.sum(np.diff(np.sign(_arr)) != 0))
+                _n = len(_arr)
+                _summary_rows.append({
+                    'Participant': person.name,
+                    'Channel':    _col,
+                    'min':        round(float(_arr.min()),                            6),
+                    'max':        round(float(_arr.max()),                            6),
+                    'mean':       round(float(_arr.mean()),                           6),
+                    'median':     round(float(np.median(_arr)),                       6),
+                    'std':        round(float(_arr.std(ddof=1)) if _n > 1 else 0.0,  6),
+                    'var':        round(float(_arr.var(ddof=1)) if _n > 1 else 0.0,  6),
+                    'ptp':        round(float(np.ptp(_arr)),                          6),
+                    'zc':         _zc,
+                    'auc':        round(float(np.trapz(np.abs(_arr), dx=1.0 / fs)),  6),
+                    'rms':        round(float(np.sqrt(np.mean(_arr ** 2))),           6),
+                    'mav':        round(float(np.mean(np.abs(_arr))),                 6),
+                    'skewness':   round(float(_ss.skew(_arr)),                        6),
+                    'kurtosis':   round(float(_ss.kurtosis(_arr)),                    6),
+                })
+            if _summary_rows:
+                _shdr = (
+                    "# Participant: {}\n"
+                    "# Sample frequency: {} Hz\n"
+                    "# Analysis segment: {:.3f} s - {:.3f} s\n"
+                ).format(person.name, fs, seg_start, seg_end)
+                _summary_name = os.path.join(
+                    participant_dir, person.name + "_summary.csv"
+                )
+                with open(_summary_name, "w", encoding="utf-8", newline="") as f:
+                    f.write(_shdr)
+                    _pd.DataFrame(_summary_rows).to_csv(f, index=False)
+
             # MVC csv — only channels that have actual MVC data loaded
             if emg.emgMVCTST and len(emg.emgMVCTST.data) > 0:
                 mvc_tst = emg.emgMVCTST

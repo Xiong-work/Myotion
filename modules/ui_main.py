@@ -48,7 +48,7 @@ from modules.kinematics.playbarwidget import PlayBarWidget
 from widgets.customframe import CustomFrame
 
 from .resources_rc import *
-from rserver import RServerBrowser
+from modules.stats import StatsWidget
 from qplotview import *
 
 
@@ -3627,7 +3627,7 @@ class Ui_MainWindow(object):
         self.horizontalLayout_36.addWidget(self.kinematics_right)
         self.stackedWidget.addWidget(self.kinematics_page)
 
-        self.stats_page = RServerBrowser()
+        self.stats_page = StatsWidget()
         self.stats_page.setObjectName("stats_page")
 
         self.stackedWidget.addWidget(self.stats_page)
