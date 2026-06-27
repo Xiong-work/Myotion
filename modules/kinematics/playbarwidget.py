@@ -1,6 +1,6 @@
 from enum import Enum
 
-from PySide6.QtGui import QMouseEvent, QPainter, QIcon, QAction
+from PySide6.QtGui import QMouseEvent, QPainter, QColor, QPen, QFont, QPalette
 from PySide6.QtWidgets import (
     QSlider,
     QPushButton,
@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QComboBox,
 )
-from PySide6.QtCore import Qt, QPoint, QRect, Signal
+from PySide6.QtCore import Qt, Signal
 
 
 class State(Enum):
@@ -22,64 +22,114 @@ class State(Enum):
     PAUSE = 2
 
 
+# ── Mokka-inspired light theme ────────────────────────────────────────────────
+_BG        = "#f5f6f7"
+_GROOVE    = "#c8c8c8"
+_FILLED    = "#93b8e0"
+_CURSOR    = "#1a73e8"
+_TICK      = "#888888"
+_LABEL_CLR = "#444444"
+
 buttonStyle = """
     QPushButton {
-        background-color: #343b48;
-        border: 1px solid #495474;
-        border-radius: 5px;
-        padding: 5px 12px;
-        color: #ddd;
-        font: bold 10pt "Segoe UI";
-        height: 25px;
-        min-width: 60px;
+        background-color: #f0f1f2;
+        border: 1px solid #c0c0c0;
+        border-radius: 4px;
+        padding: 2px 10px;
+        color: #333333;
+        font: 9pt "Segoe UI";
+        height: 26px;
+        min-width: 48px;
     }
     QPushButton:hover {
-        background-color: #495474;
-        border: 1px solid #bd93f9;
+        background-color: #dceaf8;
+        border: 1px solid #1a73e8;
+        color: #1a73e8;
     }
     QPushButton:pressed {
-        background-color: #566388;
-        padding-top: 6px;
+        background-color: #c8dff5;
     }
     QPushButton:on {
-        background-color: #566388;
-        border: 1px solid #bd93f9;
+        background-color: #c8dff5;
+        border: 1px solid #1a73e8;
+        color: #1a73e8;
     }
     QPushButton:disabled {
-        background-color: #2c3039;
-        color: #666;
-        border: 1px solid #444;
+        background-color: #e8e8e8;
+        color: #aaaaaa;
+        border: 1px solid #d0d0d0;
     }
 """
 
-_stepStyle = (
-    "QComboBox {"
-    " background-color: #343b48;"
-    " color: #ddd;"
-    " border: 1px solid #495474;"
-    " border-radius: 5px;"
-    " padding: 5px 8px;"
-    " height: 25px;"
-    " min-width: 80px;"
-    " font: bold 10pt 'Segoe UI';"
-    "}"
-    "QComboBox:hover { border: 1px solid #bd93f9; }"
-    "QComboBox::drop-down {"
-    " subcontrol-origin: padding;"
-    " subcontrol-position: top right;"
-    " width: 20px;"
-    " border-left: 1px solid #495474;"
-    " border-top-right-radius: 4px;"
-    " border-bottom-right-radius: 4px;"
-    "}"
-    "QComboBox QAbstractItemView {"
-    " background-color: #343b48;"
-    " color: #ddd;"
-    " border: 1px solid #495474;"
-    " selection-background-color: #495474;"
-    " selection-color: #f4f4f4;"
-    "}"
-)
+_stepStyle = """
+    QComboBox {
+        background-color: #f0f1f2;
+        color: #333333;
+        border: 1px solid #c0c0c0;
+        border-radius: 4px;
+        padding: 2px 8px;
+        height: 26px;
+        min-width: 70px;
+        font: 9pt "Segoe UI";
+    }
+    QComboBox:hover { border: 1px solid #1a73e8; }
+    QComboBox:disabled { background-color: #e8e8e8; color: #aaa; }
+    QComboBox::drop-down {
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 18px;
+        border-left: 1px solid #c0c0c0;
+        border-top-right-radius: 4px;
+        border-bottom-right-radius: 4px;
+    }
+    QComboBox QAbstractItemView {
+        background-color: #ffffff;
+        color: #333333;
+        border: 1px solid #c0c0c0;
+        selection-background-color: #dceaf8;
+        selection-color: #1a73e8;
+    }
+"""
+
+_SLIDER_SS = """
+    QSlider {
+        background-color: #f5f6f7;
+        padding-left:   4px;
+        padding-right:  4px;
+        padding-top:    8px;
+        padding-bottom: 32px;
+    }
+    QSlider::groove:horizontal {
+        background: #c8c8c8;
+        height: 2px;
+        border-radius: 1px;
+    }
+    QSlider::sub-page:horizontal {
+        background: #93b8e0;
+        height: 2px;
+        border-radius: 1px;
+    }
+    QSlider::add-page:horizontal {
+        background: #c8c8c8;
+        height: 2px;
+        border-radius: 1px;
+    }
+    QSlider::handle:horizontal {
+        background: #1a73e8;
+        border: none;
+        width: 3px;
+        height: 24px;
+        margin-top:    -11px;
+        margin-bottom: -11px;
+        border-radius: 1px;
+    }
+    QSlider::handle:horizontal:hover {
+        background: #0d5bbf;
+    }
+    QSlider::handle:horizontal:disabled {
+        background: #b8b8b8;
+    }
+"""
 
 
 class SliderWidget(QSlider):
@@ -89,126 +139,78 @@ class SliderWidget(QSlider):
         self.setMinimum(0)
         self.setMaximum(100)
         self.setValue(0)
-        self.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.setTickInterval(10)
+        self.setTickPosition(QSlider.TickPosition.NoTicks)
         self.setSingleStep(1)
-        self.setStyleSheet(
-            """
-            QSlider {
-                padding-left: 0px;
-                padding-right: 10px;
-                padding-bottom: 20px;
-            }
-            QSlider::groove:horizontal {
-                background: #343b48;
-                height: 10px;
-                border-radius: 5px;
-            }
-            QSlider::sub-page:horizontal {
-                background: qlineargradient(x1: 0, y1: 0.2, x2: 1, y2: 1,
-                    stop: 0 #ea995a, stop: 1 #fb6c05);
-                height: 10px;
-                border-radius: 5px;
-            }
-            QSlider::add-page:horizontal {
-                background: #343b48;
-                height: 10px;
-                border-radius: 5px;
-            }
-            QSlider::handle:horizontal {
-                background: #ddd;
-                border: 1px solid #888;
-                width: 14px;
-                height: 14px;
-                margin-top: -2px;
-                margin-bottom: -2px;
-                border-radius: 7px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #fff;
-                border: 1px solid #bd93f9;
-            }
-            QSlider::sub-page:horizontal:disabled {
-                background: #444;
-            }
-            QSlider::add-page:horizontal:disabled {
-                background: #2c3039;
-            }
-            QSlider::handle:horizontal:disabled {
-                background: #555;
-                border: 1px solid #444;
-            }
-            """
-        )
-        self.left_margin = 0
-        self.top_margin = 10
-        self.right_margin = 10
-        self.bottom_margin = 10
-        levels = range(0, 110, 10)
-        self.levels = list(zip(levels, map(str, levels)))
+        self.setStyleSheet(_SLIDER_SS)
+        self.levels = list(zip(range(0, 110, 10), map(str, range(0, 110, 10))))
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        style = self.style()
-        painter = QPainter(self)
-        st_slider = QStyleOptionSlider()
-        st_slider.initFrom(self)
 
-        length = style.pixelMetric(QStyle.PixelMetric.PM_SliderLength, st_slider, self)
-        available = style.pixelMetric(
-            QStyle.PixelMetric.PM_SliderSpaceAvailable, st_slider, self
+        style  = self.style()
+        opt    = QStyleOptionSlider()
+        opt.initFrom(self)
+
+        handle_len = style.pixelMetric(QStyle.PixelMetric.PM_SliderLength, opt, self)
+        available  = style.pixelMetric(QStyle.PixelMetric.PM_SliderSpaceAvailable, opt, self)
+
+        groove = style.subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt,
+            QStyle.SubControl.SC_SliderGroove, self,
         )
+        groove_cy = groove.center().y()
+        tick_y0   = groove_cy + 5
+        tick_y1   = tick_y0 + 7
+
+        painter = QPainter(self)
+        font = QFont("Segoe UI", 8)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        label_y = tick_y1 + fm.ascent() + 3
 
         for v, v_str in self.levels:
-            rect = painter.drawText(QRect(), Qt.TextFlag.TextDontPrint, v_str)
-            x_loc = (
+            x = (
                 QStyle.sliderPositionFromValue(
                     self.minimum(), self.maximum(), v, available
                 )
-                + length // 2
+                + handle_len // 2
             )
-            left = x_loc - rect.width() - self.left_margin
-            bottom = self.rect().bottom()
-            if v == self.minimum():
-                if left <= 0:
-                    self.left_margin = rect.width() // 2 - x_loc
-                if self.bottom_margin <= rect.height():
-                    self.bottom_margin = rect.height()
-                self.setContentsMargins(
-                    self.left_margin,
-                    self.top_margin,
-                    self.right_margin,
-                    self.bottom_margin,
-                )
-            pos = QPoint(left, bottom)
-            painter.drawText(pos, v_str)
-        return
 
-    def setRange(self, min, max):
-        self.setMinimum(min)
-        self.setMaximum(max)
-        interval = (max - min) // 10
-        # Ensure there is at least one interval.
+            painter.setPen(QPen(QColor(_TICK), 1))
+            painter.drawLine(x, tick_y0, x, tick_y1)
+
+            text_w  = fm.horizontalAdvance(v_str)
+            label_x = max(0, min(x - text_w // 2, self.width() - text_w))
+            painter.setPen(QPen(QColor(_LABEL_CLR)))
+            painter.drawText(label_x, label_y, v_str)
+
+        painter.end()
+
+    def setRange(self, min_val, max_val):
+        self.setMinimum(min_val)
+        self.setMaximum(max_val)
+        interval = (max_val - min_val) // 10
         if interval == 0:
             interval = 1
-            
         self.levels = list(
-            zip(range(min, max + 1, interval), 
-            map(str, range(min, max + 1, interval))))
+            zip(
+                range(min_val, max_val + 1, interval),
+                map(str, range(min_val, max_val + 1, interval)),
+            )
+        )
         self.repaint()
 
     def mousePressEvent(self, event):
         self.setValue(
             self.minimum()
-            + (self.maximum() - self.minimum()) * event.x() / self.width()
+            + int((self.maximum() - self.minimum()) * event.position().x() / self.width())
         )
 
     def mouseMoveEvent(self, ev: QMouseEvent) -> None:
-        # if mouse is pressed and moving change value of slider
-        if ev.buttons() == Qt.LeftButton:
+        if ev.buttons() == Qt.MouseButton.LeftButton:
             self.setValue(
                 self.minimum()
-                + (self.maximum() - self.minimum()) * ev.x() / self.width()
+                + int((self.maximum() - self.minimum()) * ev.position().x() / self.width())
             )
 
     def get_value(self):
@@ -218,104 +220,146 @@ class SliderWidget(QSlider):
         self.valueChanged.connect(controller.slider_valuechange)
 
 
-PlayIcon = ":/icons/images/icons/cil-media-play.png"
-ForwardIcon = ":/icons/images/icons/cil-media-skip-forward.png"
-BackwardIcon = ":/icons/images/icons/cil-media-skip-backward.png"
-PauseIcon = ":/icons/images/icons/cil-media-pause.png"
-
-
 class PlayBarWidget(QWidget):
-    eventMarkRequested = Signal()       # emitted when user clicks "Mark Event"
-    exportEventsRequested = Signal()    # emitted when user clicks "Export Events"
-    onsetDetectionToggled = Signal(bool)  # emitted with new checked state when toggled
+    eventMarkRequested    = Signal()
+    exportEventsRequested = Signal()
+    onsetDetectionToggled = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._fps = 0.0
         self.initui(parent)
+        self._set_controls_enabled(False)
 
     def initui(self, parent=None):
-        vboxlayout = QVBoxLayout()
-        self.setLayout(vboxlayout)
-        self.setStyleSheet("background-color: #2c3039; color: #ddd;")
+        # Persistent light background — survives any parent setStyleSheet() calls
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Window, QColor(_BG))
+        self.setPalette(pal)
+        self.setAutoFillBackground(True)
+
+        self.setMinimumHeight(110)
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(6, 6, 6, 4)
+        vbox.setSpacing(4)
+
+        # ── Ruler / timeline ──────────────────────────────────────────────
         self.slider = SliderWidget(parent)
-        self.current_frame_label = QLabel(self.tr("Current Frame:"), parent)
-        self.current_frame_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.current_frame_label.setStyleSheet("color: #aaa; font-size: 9pt;")
-        self.slider.valueChanged.connect(
-            lambda x: self.current_frame_label.setText(self.tr("Current Frame: ") + str(x))
+        self.slider.valueChanged.connect(self._on_frame_changed)
+
+        # ── Controls row ──────────────────────────────────────────────────
+        ctrl = QFrame()
+        ctrl.setStyleSheet(f"background-color: {_BG};")
+        hbox = QHBoxLayout(ctrl)
+        hbox.setContentsMargins(0, 0, 0, 0)
+        hbox.setSpacing(6)
+
+        _transport_ss = (
+            buttonStyle
+            + "QPushButton { min-width: 34px; max-width: 42px; font: 12pt 'Segoe UI'; }"
         )
-        self.button_group = QFrame(parent)
-        self.playbutton = QPushButton(self.tr("Play"), self.button_group)
+
+        self.prevFrameButton = QPushButton("◀")
+        self.prevFrameButton.setToolTip(self.tr("Previous frame"))
+        self.prevFrameButton.setStyleSheet(_transport_ss)
+        self.prevFrameButton.clicked.connect(self.on_frame_button_clicked)
+
+        self.playbutton = QPushButton("▶")
+        self.playbutton.setToolTip(self.tr("Play / Pause"))
+        self.playbutton.setCheckable(True)
+        self.playbutton.setStyleSheet(_transport_ss)
         self.playbutton.clicked.connect(self.on_play_button_clicked)
         self.state = State.STOP
-        self.playbutton.setIcon(QIcon(PlayIcon))
-        self.playbutton.setCheckable(True)
-        self.playbutton.setStyleSheet(buttonStyle)
 
-        self.prevFrameButton = QPushButton(self.tr("Prev"), self.button_group)
-        self.prevFrameButton.clicked.connect(self.on_frame_button_clicked)
-        self.prevFrameButton.setStyleSheet(buttonStyle)
-
-        self.prevFrameButton.setIcon(QIcon(BackwardIcon))
-
-        self.nextFrameButton = QPushButton(self.tr("Next"), self.button_group)
+        self.nextFrameButton = QPushButton("▶▶")
+        self.nextFrameButton.setToolTip(self.tr("Next frame"))
+        self.nextFrameButton.setStyleSheet(_transport_ss)
         self.nextFrameButton.clicked.connect(self.on_frame_button_clicked)
-        self.nextFrameButton.setIcon(QIcon(ForwardIcon))
-        self.nextFrameButton.setStyleSheet(buttonStyle)
 
-        self.step = QComboBox(self.button_group)
+        self.current_frame_label = QLabel("Frame: 0   Time: 0.000 s")
+        self.current_frame_label.setStyleSheet(
+            f"background-color: {_BG}; color: #222222;"
+            " font: 9pt 'Segoe UI'; min-width: 180px;"
+        )
+        self.current_frame_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        self.step = QComboBox()
         self.step.addItems([self.tr("Increment"), "5", "10", "20", "50", "100"])
         self.step.setStyleSheet(_stepStyle)
+        self.step.setToolTip(self.tr("Step size"))
 
-        self.markEventButton = QPushButton(self.tr("Mark Event"), self.button_group)
+        self.filterCheck = QPushButton(self.tr("Filter"))
+        self.filterCheck.setCheckable(True)
+        self.filterCheck.setChecked(True)
+        self.filterCheck.setStyleSheet(buttonStyle)
+
+        self.markEventButton = QPushButton(self.tr("Mark Event"))
         self.markEventButton.setStyleSheet(buttonStyle)
         self.markEventButton.clicked.connect(self.eventMarkRequested)
 
-        self.exportEventsButton = QPushButton(self.tr("Export Events"), self.button_group)
+        self.exportEventsButton = QPushButton(self.tr("Export Events"))
         self.exportEventsButton.setStyleSheet(buttonStyle)
         self.exportEventsButton.clicked.connect(self.exportEventsRequested)
 
-        self.filterCheck = QPushButton(self.tr("Filter"), self.button_group)
-        self.filterCheck.setCheckable(True)
-        self.filterCheck.setChecked(True)  # filtering on by default
-        self.filterCheck.setStyleSheet(buttonStyle)
-
-        self.onsetDetectionButton = QPushButton(self.tr("Onset Detection"), self.button_group)
+        self.onsetDetectionButton = QPushButton(self.tr("Onset"))
         self.onsetDetectionButton.setCheckable(True)
         self.onsetDetectionButton.setChecked(False)
         self.onsetDetectionButton.setStyleSheet(buttonStyle)
+        self.onsetDetectionButton.setToolTip(self.tr("Onset Detection"))
         self.onsetDetectionButton.clicked.connect(
             lambda checked: self.onsetDetectionToggled.emit(checked)
         )
 
-        hboxlayout = QHBoxLayout(self.button_group)
-        hboxlayout.addStretch()
-        hboxlayout.addWidget(self.prevFrameButton)
-        hboxlayout.addWidget(self.playbutton)
-        hboxlayout.addWidget(self.nextFrameButton)
-        hboxlayout.addWidget(self.step)
-        hboxlayout.addWidget(self.markEventButton)
-        hboxlayout.addWidget(self.exportEventsButton)
-        hboxlayout.addWidget(self.filterCheck)
-        hboxlayout.addWidget(self.onsetDetectionButton)
-        hboxlayout.addStretch()
-        vboxlayout.addWidget(self.slider)
-        vboxlayout.addWidget(self.current_frame_label)
-        vboxlayout.addWidget(self.button_group)
+        hbox.addWidget(self.prevFrameButton)
+        hbox.addWidget(self.playbutton)
+        hbox.addWidget(self.nextFrameButton)
+        hbox.addWidget(self.current_frame_label)
+        hbox.addWidget(self.step)
+        hbox.addStretch()
+        hbox.addWidget(self.filterCheck)
+        hbox.addWidget(self.markEventButton)
+        hbox.addWidget(self.exportEventsButton)
+        hbox.addWidget(self.onsetDetectionButton)
+
+        vbox.addWidget(self.slider)
+        vbox.addWidget(ctrl)
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def set_frame_rate(self, fps: float):
+        """Set the frame rate used to compute time-in-seconds display."""
+        self._fps = fps
+
+    def enable_playback(self):
+        """Enable all playback controls — call once kinematics data is loaded."""
+        self._set_controls_enabled(True)
+
+    # ── Internal helpers ──────────────────────────────────────────────────
+
+    def _set_controls_enabled(self, enabled: bool):
+        self.slider.setEnabled(enabled)
+        self.prevFrameButton.setEnabled(enabled)
+        self.playbutton.setEnabled(enabled)
+        self.nextFrameButton.setEnabled(enabled)
+
+    def _on_frame_changed(self, frame: int):
+        t = frame / self._fps if self._fps > 0 else 0.0
+        self.current_frame_label.setText(f"Frame: {frame}   Time: {t:.3f} s")
+
+    # ── Playback state ────────────────────────────────────────────────────
 
     def on_frame_button_clicked(self):
         if self.state == State.PLAY:
             self.state = State.PAUSE
 
     def on_play_button_clicked(self):
-        if self.state == State.STOP or self.state == State.PAUSE:
+        if self.state in (State.STOP, State.PAUSE):
             self.state = State.PLAY
-            self.playbutton.setIcon(QIcon(PauseIcon))
-            self.playbutton.setText(self.tr("Pause"))
-        elif self.state == State.PLAY:
+            self.playbutton.setText("⏸")
+        else:
             self.state = State.PAUSE
-            self.playbutton.setIcon(QIcon(PlayIcon))
-            self.playbutton.setText(self.tr("Play"))
+            self.playbutton.setText("▶")
 
     def is_playing(self):
         return self.state == State.PLAY
