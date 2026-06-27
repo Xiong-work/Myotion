@@ -3581,7 +3581,6 @@ class Ui_MainWindow(object):
         # Control bar
         self.playSlider = PlayBarWidget(self.kinematics_left_bottom)
         self.playSlider.setObjectName("playSlider")
-        self.playSlider.setStyleSheet("")
 
         self.verticalLayout_49.addWidget(self.playSlider)
 
