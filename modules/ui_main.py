@@ -3498,7 +3498,7 @@ class Ui_MainWindow(object):
 
         self.label_current_process = QLabel()
         self.label_current_process.setAlignment(Qt.AlignCenter)
-        self.label_current_process.setText("Plot")
+        self.label_current_process.setText("Signals")
         self.label_current_process.setObjectName("label_11")
         self.label_current_process.setStyleSheet(
             "font-weight: bold;\n"
