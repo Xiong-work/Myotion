@@ -4,8 +4,6 @@
   </qresource>
   <qresource prefix="images">
     <file>Myotion_logo.png</file>
-    <file>images/images/PyDracula.png</file>
-    <file>images/images/PyDracula_vertical.png</file>
   </qresource>
   <qresource prefix="icons">
     <file>images/icons/cil-3d.png</file>
@@ -117,6 +115,7 @@
     <file>images/icons/cil-flip-to-back.png</file>
     <file>images/icons/cil-folder.png</file>
     <file>images/icons/cil-folder-open.png</file>
+    <file>images/icons/cil-folder-remove.png</file>
     <file>images/icons/cil-frown.png</file>
     <file>images/icons/cil-gamepad.png</file>
     <file>images/icons/cil-hand-point-down.png</file>
@@ -130,6 +129,7 @@
     <file>images/icons/cil-highligt.png</file>
     <file>images/icons/cil-history.png</file>
     <file>images/icons/cil-home.png</file>
+    <file>images/icons/cil-home-bold.png</file>
     <file>images/icons/cil-house.png</file>
     <file>images/icons/cil-image1.png</file>
     <file>images/icons/cil-image-plus.png</file>
@@ -266,5 +266,8 @@
     <file>images/icons/greencheckmark.png</file>
     <file>images/icons/redcross.png</file>
     <file>images/icons/loading.gif</file>
+    <file>images/icons/Freq_icon_nav.png</file>
+    <file>images/icons/icon-adv-module.png</file>
+    <file>images/icons/icon-stats-nav.png</file>
   </qresource>
 </RCC>

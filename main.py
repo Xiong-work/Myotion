@@ -1022,8 +1022,7 @@ class MainWindow(QMainWindow):
         self._btn_clear_ws.setMinimumHeight(45)
         self._btn_clear_ws.setCursor(Qt.PointingHandCursor)
         self._btn_clear_ws.setStyleSheet(
-            "color:#f4f4f4; background-color:rgba(180,60,60,0.75);"
-            " font-weight:bold; text-align:left; padding-left:8px;"
+            "background-image: url(:/icons/images/icons/cil-folder-remove.png);"
         )
         self._btn_clear_ws.clicked.connect(self.clearWorkspaceButtonClick)
         widgets.verticalLayout_11.insertWidget(0, self._btn_clear_ws)
