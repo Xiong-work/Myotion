@@ -17,6 +17,7 @@
 import sys
 import os
 import re
+import subprocess
 from pathlib import Path
 from thefuzz import fuzz as _fuzz
 import webbrowser
@@ -1068,6 +1069,8 @@ class MainWindow(QMainWindow):
         self.sigUpdateParticipants.connect(self.updateEMGParticipantBox)
         self.sigAsyncLoadError.connect(self.handleAsyncLoadError)
         widgets.treeView.doubleClicked.connect(self.handleTreeViewDoubleClick)
+        widgets.treeView.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        widgets.treeView.customContextMenuRequested.connect(self.showTreeViewContextMenu)
 
         # Menu bar
         widgets.fileMenu.clicked.connect(self.fileMenuClick)
@@ -1929,7 +1932,29 @@ class MainWindow(QMainWindow):
         self._set_add_emg_enabled(False)
         self.updateWorkProjectTreeWidget()
         self.updateEMGParticipantBox()
+        self.updateWorkSpaceParticipantBox()
         self.updateEMGSavedConfigureList()
+        # Kinematics Inspection / EMG Frequency Domain participant lists are
+        # only refreshed when the user navigates to those tabs, so clear them
+        # here too rather than leaving stale entries until the next visit.
+        widgets.kinematics_label_tree.clear()
+        widgets.frequency_participants.clear()
+        widgets.stats_page.on_workspace_changed(None)
+        # singleEMG is now (None, None, None) after reset() — this hides the
+        # Time Domain "Previous/Current Process" plots instead of leaving the
+        # last-viewed channel's waveform on screen.
+        self.updateEMGSignalProcessPanel()
+        self.freqAnalysisPlots.clear()
+        widgets.scrollArea_3.deleteAllPages()
+        # EMG pipeline step cards (Analysis Segment's Step 1-6 panel)
+        self._pipeline_panel.clear()
+        # Kinematics Inspection 3D render + "Signals" waveform panel
+        widgets.renderWidget.setModel(None)
+        widgets.kinematic_analysis.clear()
+        # Frequency Domain segment waveform + its Start/End Time fields
+        widgets.freq_timedomain.hide()
+        widgets.lineEdit_5.setText("")
+        widgets.lineEdit_4.setText("")
 
     def newProjectButtonClick(self):
         if self.ifOldProjectOpened():
@@ -2907,6 +2932,10 @@ class MainWindow(QMainWindow):
     # //////////////////////////////////////////////////////////////
     @Slot()
     def updateEMGParticipantBox(self):
+        if self.workspace is None:
+            widgets.tableWidget_2.clearContents()
+            widgets.tableWidget_2.setRowCount(0)
+            return
         participants = self.workspace.getFilteredParticipants(self.participant_filter)
         n = len(participants)
         widgets.tableWidget_2.clearContents()
@@ -2943,6 +2972,9 @@ class MainWindow(QMainWindow):
 
     def updateWorkSpaceParticipantBox(self):
         # listwidget_3
+        if self.workspace is None:
+            widgets.listWidget_3.clear()
+            return
         participants = self.workspace.getParticipants()
         n = len(participants)
         widgets.listWidget_3.clear()
@@ -3141,9 +3173,46 @@ class MainWindow(QMainWindow):
             
             # Load project.
             self.loadWorkSpace(os.path.dirname(file_path), os.path.basename(file_path))
-            
+
+    def showTreeViewContextMenu(self, pos):
+        """Right-click menu for the workspace file tree — 'Reveal in Explorer/Finder'."""
+        index = widgets.treeView.indexAt(pos)
+        if not index.isValid():
+            return
+        file_path = self.filesystemTree.filePath(index)
+        if not file_path:
+            return
+
+        if sys.platform == "win32":
+            label = self.tr("Reveal in Explorer")
+        elif sys.platform == "darwin":
+            label = self.tr("Reveal in Finder")
+        else:
+            label = self.tr("Open Containing Folder")
+
+        menu = QMenu(self)
+        menu.addAction(label, lambda: self.revealInFileExplorer(file_path))
+        menu.exec(widgets.treeView.viewport().mapToGlobal(pos))
+
+    def revealInFileExplorer(self, file_path):
+        """Open the OS file browser with file_path selected, like other apps'
+        'Reveal in Folder' / 'Show in Explorer' context-menu action."""
+        file_path = os.path.normpath(file_path)
+        if not os.path.exists(file_path):
+            return
+        if sys.platform == "win32":
+            subprocess.run(["explorer", "/select,", file_path])
+        elif sys.platform == "darwin":
+            subprocess.run(["open", "-R", file_path])
+        else:
+            # No universal "select this file" support across Linux file
+            # managers — open the containing folder instead.
+            folder = file_path if os.path.isdir(file_path) else os.path.dirname(file_path)
+            subprocess.run(["xdg-open", folder])
+
     def updateEMGSavedConfigureList(self):
         if self.workspace is None:
+            widgets.listWidget_2.clear()
             return
         # update configuration list
         widgets.listWidget_2.clear()
@@ -3244,7 +3313,7 @@ class MainWindow(QMainWindow):
         widgets.frequency_participants.itemDoubleClicked.connect(
             self.updateFreqAnalysisWaveformPanel
         )
-        widgets.frequency_participants.setHeaderItem(QTreeWidgetItem(["Participant"]))
+        widgets.frequency_participants.setHeaderItem(QTreeWidgetItem(["Participant(s)"]))
         widgets.frequency_participants.addTopLevelItem(treeItem)
 
     def updateFreqAnalysisWaveformPanel(self, item, column):
@@ -3315,9 +3384,13 @@ class MainWindow(QMainWindow):
         self.outputBuffer = None
         self.workspace = None
         self.home = None
+        self.model = None
+        self.freqAnalysis = (None, None)
         self.filesystemTree = QFileSystemModel()
         self.selectedParticipants.clear()
         self._crop_group.setEnabled(False)
+        self._crop_start_spin.setValue(0.0)
+        self._crop_end_spin.setValue(0.0)
         self._crop_status_label.setText("Full trial (no crop)")
         self._crop_status_label.setStyleSheet("color: gray; font-size: 10px;")
 
@@ -3441,7 +3514,7 @@ class MainWindow(QMainWindow):
                 treeItem.addChild(crop_node)
 
         tree.itemDoubleClicked.connect(self.loadKinemtic)
-        tree.setHeaderItem(QTreeWidgetItem(["Participant"]))
+        tree.setHeaderItem(QTreeWidgetItem(["Participant(s)"]))
         tree.addTopLevelItem(treeItem)
 
     def _setup_kinematics_splitters(self):
@@ -3734,6 +3807,84 @@ class MainWindow(QMainWindow):
         wave_path = os.path.join(icons_dir, "emg_wave.png")
         pix.save(wave_path, "PNG")
 
+        # ── Workspace panel toggle (hide/show), drawn once then mirrored ───────
+        pix = QPixmap(W, H)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(WHITE)
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+
+        # Panel edge (vertical bar) with an arrow pointing away from it —
+        # "hide" collapses the panel toward/off the left edge.
+        p.drawLine(QPointF(15, 3), QPointF(15, 17))
+        p.drawLine(QPointF(4, 10), QPointF(13, 10))    # shaft
+        p.drawLine(QPointF(4, 10), QPointF(8, 6))       # arrowhead
+        p.drawLine(QPointF(4, 10), QPointF(8, 14))
+        p.end()
+
+        workspace_hide_path = os.path.join(icons_dir, "workspace_hide.png")
+        pix.save(workspace_hide_path, "PNG")
+
+        workspace_show_path = os.path.join(icons_dir, "workspace_show.png")
+        pix.toImage().mirrored(True, False).save(workspace_show_path, "PNG")
+
+        # Panel starts closed (see extraLeftBox's initial max width of 0), so
+        # the button should initially offer to show it; toggleLeftBox() swaps
+        # between these two icons on each click.
+        self._workspace_hide_icon_path = workspace_hide_path
+        self._workspace_show_icon_path = workspace_show_path
+
+        # ── Recolor provided glyph icons for the dark sidebar ──────────────────
+        # advanced.png / statistical.png ship as black glyphs on an opaque
+        # white canvas (not true alpha-transparent PNGs), so they'd render as
+        # solid white squares on the dark menu. Invert luminance into the
+        # alpha channel — dark strokes become opaque white, the light canvas
+        # becomes transparent — then downscale to match the other nav icons.
+        def _recolor_white(src_path, out_name):
+            import numpy as _np
+            from PySide6.QtGui import QImage
+
+            src = QImage(src_path)
+            if src.isNull():
+                return None
+            src = src.convertToFormat(QImage.Format.Format_ARGB32)
+            w, h = src.width(), src.height()
+            stride = src.bytesPerLine() // 4
+            buf = src.constBits()
+            if hasattr(buf, "setsize"):
+                buf.setsize(h * src.bytesPerLine())
+            arr = _np.frombuffer(buf, dtype=_np.uint8).reshape(h, stride, 4)[:, :w, :]
+            b, g, r, a = (arr[..., i].astype(_np.float32) for i in range(4))
+            luminance = 0.299 * r + 0.587 * g + 0.114 * b
+            new_alpha = ((255.0 - luminance) * (a / 255.0)).clip(0, 255).astype(_np.uint8)
+
+            out = _np.zeros((h, w, 4), dtype=_np.uint8)
+            out[..., :3] = 255  # white
+            out[..., 3] = new_alpha
+            out_img = QImage(out.data, w, h, QImage.Format.Format_ARGB32).copy()
+            out_img = out_img.scaled(
+                W, H, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            out_path = os.path.join(icons_dir, out_name)
+            out_img.save(out_path, "PNG")
+            return out_path
+
+        advanced_path = _recolor_white(
+            os.path.join(icons_dir, "advanced.png"), "advanced_nav.png"
+        )
+        statistical_path = _recolor_white(
+            os.path.join(icons_dir, "statistical.png"), "statistical_nav.png"
+        )
+        workspace_header_path = _recolor_white(
+            os.path.join(icons_dir, "workspace.png"), "workspace_header_nav.png"
+        )
+        home_path = os.path.join(os.path.dirname(__file__), "images", "icons", "cil-home.png")
+
         # ── Apply to buttons via CSS file URL ─────────────────────────────────
         def _css_url(fp):
             return fp.replace("\\", "/")
@@ -3744,8 +3895,35 @@ class MainWindow(QMainWindow):
         widgets.btn_emg.setStyleSheet(
             f"background-image: url({_css_url(wave_path)});"
         )
+        if os.path.exists(home_path):
+            widgets.btn_start.setStyleSheet(
+                f"background-image: url({_css_url(home_path)});"
+            )
+        if advanced_path:
+            widgets.btn_advanced.setStyleSheet(
+                f"background-image: url({_css_url(advanced_path)});"
+            )
+        if statistical_path:
+            widgets.btn_stats.setStyleSheet(
+                f"background-image: url({_css_url(statistical_path)});"
+            )
+        if workspace_header_path:
+            widgets.extraIcon.setStyleSheet(
+                f"background-image: url({_css_url(workspace_header_path)});"
+                "background-position: center;"
+                "background-repeat: no-repeat;"
+            )
+        widgets.toggleLeftBox.setStyleSheet(
+            f"background-image: url({_css_url(workspace_show_path)});"
+        )
+        # The panel's own close button always hides it, so it always shows the
+        # "hide" affordance — same icon as the sidebar toggle uses when open.
+        widgets.extraCloseColumnBtn.setIcon(QIcon(workspace_hide_path))
 
     def preloadKinematicPage(self):
+        if self.workspace is None:
+            widgets.kinematics_label_tree.clear()
+            return
         ps = self.workspace.getParticipants()
         self.populateKinematicTree(widgets.kinematics_label_tree, ps)
 
@@ -3788,6 +3966,9 @@ class MainWindow(QMainWindow):
 
     def preloadFreqAnalysisPage(self):
         if self.workspace == None:
+            widgets.frequency_participants.clear()
+            self.freqAnalysisPlots.clear()
+            widgets.scrollArea_3.deleteAllPages()
             return -1
         self.updateFreqAnalysisParticipantTree(self.workspace.getParticipants())
         self.freqAnalysisPlots.clear()

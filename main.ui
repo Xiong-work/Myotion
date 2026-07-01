@@ -1111,7 +1111,7 @@ font-size:10px;
                    <string notr="true">background-image: url(:/icons/images/icons/icon_settings.png);</string>
                   </property>
                   <property name="text">
-                   <string>Extra </string>
+                   <string>Show/Hide WorkSpace</string>
                   </property>
                  </widget>
                 </item>
@@ -7323,11 +7323,6 @@ border:none;</string>
                       </layout>
                      </widget>
                      <widget class="QWidget" name="home">
-                      <property name="styleSheet">
-                       <string notr="true">background-image: url(:/images/images/images/PyDracula_vertical.png);
-background-position: center;
-background-repeat: no-repeat;</string>
-                      </property>
                      </widget>
                      <widget class="QWidget" name="widgets">
                       <property name="styleSheet">
@@ -9308,7 +9303,7 @@ margin:3px 2px;</string>
                   <property name="maximumSize">
                    <size>
                     <width>16777215</width>
-                    <height>16</height>
+                    <height>22</height>
                    </size>
                   </property>
                   <property name="font">

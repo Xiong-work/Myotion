@@ -354,6 +354,10 @@ class StatsWidget(QWidget):
 
     def _reload_data(self):
         if not self._workspace_path:
+            self._df = None
+            self._groups.clear()
+            self._refresh_participant_list()
+            self._refresh_combos()
             self._chart_view.show_placeholder("No workspace loaded.")
             return
         self._df = load_workspace_summary(self._workspace_path)

@@ -103,14 +103,18 @@ class UIFunctions(MainWindow):
             color = Settings.BTN_LEFT_BOX_COLOR
             standard = 0
 
-            # GET BTN STYLE
-            style = self.ui.toggleLeftBox.styleSheet()
+            hide_icon = getattr(self, "_workspace_hide_icon_path", None)
+            show_icon = getattr(self, "_workspace_show_icon_path", None)
 
             # SET MAX WIDTH
             if width == 0:
                 widthExtended = maxExtend
-                # SELECT BTN
-                self.ui.toggleLeftBox.setStyleSheet(style + color)
+                # Panel is opening — button now offers to hide it
+                if hide_icon:
+                    icon_style = "background-image: url({});".format(
+                        hide_icon.replace("\\", "/")
+                    )
+                    self.ui.toggleLeftBox.setStyleSheet(icon_style + color)
                 if widthRightBox != 0:
                     style = self.ui.settingsTopBtn.styleSheet()
                     self.ui.settingsTopBtn.setStyleSheet(
@@ -118,8 +122,12 @@ class UIFunctions(MainWindow):
                     )
             else:
                 widthExtended = standard
-                # RESET BTN
-                self.ui.toggleLeftBox.setStyleSheet(style.replace(color, ""))
+                # Panel is closing — button now offers to show it
+                if show_icon:
+                    icon_style = "background-image: url({});".format(
+                        show_icon.replace("\\", "/")
+                    )
+                    self.ui.toggleLeftBox.setStyleSheet(icon_style)
 
         UIFunctions.start_box_animation(self, width, widthRightBox, "left")
 

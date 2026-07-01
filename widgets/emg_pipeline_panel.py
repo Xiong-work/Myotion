@@ -270,6 +270,15 @@ class EMGPipelinePanel(QWidget):
 
         self._vbox.addStretch()
 
+    def clear(self):
+        """Remove all step cards, leaving an empty panel."""
+        while self._vbox.count():
+            item = self._vbox.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+        self._cards.clear()
+
     def highlightStep(self, step_index):
         for i, card in enumerate(self._cards):
             card.setActive(i == step_index)

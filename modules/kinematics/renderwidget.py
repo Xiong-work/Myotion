@@ -1,14 +1,17 @@
 import os as _os
 
-from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QBoxLayout
+from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QBoxLayout, QGraphicsOpacityEffect
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 
 from .bodyrender import BodyRender
 
 _LOGO_PATH = _os.path.normpath(
-    _os.path.join(_os.path.dirname(__file__), "..", "..", "myotion_resources", "fulllogo.png")
+    _os.path.join(_os.path.dirname(__file__), "..", "..", "myotion_resources", "myotion_logo_origin.png")
 )
+
+# Placeholder watermark should read as a faint mark, not compete with "no data" messaging
+_PLACEHOLDER_LOGO_OPACITY = 0.12
 
 
 class RenderWidget(QWidget):
@@ -29,11 +32,14 @@ class RenderWidget(QWidget):
         if not _pix.isNull():
             self.placeholder.setPixmap(
                 _pix.scaled(
-                    320, 130,
+                    220, 220,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
+            _opacity_effect = QGraphicsOpacityEffect(self.placeholder)
+            _opacity_effect.setOpacity(_PLACEHOLDER_LOGO_OPACITY)
+            self.placeholder.setGraphicsEffect(_opacity_effect)
         else:
             self.placeholder.setText("No model to render")
 

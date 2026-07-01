@@ -3615,6 +3615,7 @@ class Ui_MainWindow(object):
         )
         self.kinematics_label_tree.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.kinematics_label_tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.kinematics_label_tree.setHeaderLabels(["Participant(s)"])
         tmp_verticalLayout_50.addWidget(self.kinematics_label_tree)
         self.horizontalLayout_36.addWidget(self.kinematics_right)
         self.stackedWidget.addWidget(self.kinematics_page)
@@ -3626,11 +3627,6 @@ class Ui_MainWindow(object):
 
         self.home = QWidget()
         self.home.setObjectName("home")
-        self.home.setStyleSheet(
-            "background-image: url(:/images/images/images/PyDracula_vertical.png);\n"
-            "background-position: center;\n"
-            "background-repeat: no-repeat;"
-        )
         self.stackedWidget.addWidget(self.home)
         self.widgets = QWidget()
         self.widgets.setObjectName("widgets")
@@ -4372,6 +4368,7 @@ class Ui_MainWindow(object):
         )
         self.frequency_participants.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.frequency_participants.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.frequency_participants.setHeaderLabels(["Participant(s)"])
 
         self.verticalLayout_140.addWidget(self.frequency_participants)
         self.horizontalLayout_40.addWidget(self.frequency_right)
@@ -4478,7 +4475,7 @@ class Ui_MainWindow(object):
         self.horizontalLayout_5.setContentsMargins(0, 0, 0, 0)
         self.creditsLabel = QLabel(self.bottomBar)
         self.creditsLabel.setObjectName("creditsLabel")
-        self.creditsLabel.setMaximumSize(QSize(16777215, 16))
+        self.creditsLabel.setMaximumSize(QSize(16777215, 22))
         self.creditsLabel.setFont(font2)
         self.creditsLabel.setAlignment(Qt.AlignLeading | Qt.AlignLeft | Qt.AlignVCenter)
 
@@ -4548,14 +4545,14 @@ class Ui_MainWindow(object):
             QCoreApplication.translate("MainWindow", "Statistical Analysis", None)
         )
         self.toggleLeftBox.setText(
-            QCoreApplication.translate("MainWindow", "Extra ", None)
+            QCoreApplication.translate("MainWindow", "Show/Hide WorkSpace", None)
         )
         self.extraLabel.setText(
             QCoreApplication.translate("MainWindow", "WORKSPACE", None)
         )
         # if QT_CONFIG(tooltip)
         self.extraCloseColumnBtn.setToolTip(
-            QCoreApplication.translate("MainWindow", "Close left box", None)
+            QCoreApplication.translate("MainWindow", "Hide Workspace", None)
         )
         # endif // QT_CONFIG(tooltip)
         self.extraCloseColumnBtn.setText("")
