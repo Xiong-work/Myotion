@@ -1,9 +1,27 @@
+import os as _os
+import base64 as _base64
+
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 
 from .summary_reader import METRIC_LABELS
+
+
+def _load_watermark_b64():
+    """Base64-encode the branding watermark once; empty string if missing."""
+    path = _os.path.normpath(_os.path.join(
+        _os.path.dirname(__file__), "..", "..", "myotion_resources", "myotion_logo_origin.png"
+    ))
+    try:
+        with open(path, "rb") as f:
+            return _base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        return ""
+
+
+_WATERMARK_B64 = _load_watermark_b64()
 
 # Group palette — consistent with Dracula theme used by the app
 GROUP_PALETTE = [
@@ -158,9 +176,18 @@ def figure_to_html(fig: go.Figure) -> str:
 
 
 def empty_html(message: str = "") -> str:
+    # Faint, centered logo watermark behind the message — visible enough to brand
+    # the empty state without competing with the "nothing to plot yet" text.
+    watermark = (
+        "background-image:linear-gradient(rgba(40,42,54,0.9),rgba(40,42,54,0.9)),"
+        f"url(data:image/png;base64,{_WATERMARK_B64});"
+        "background-repeat:no-repeat,no-repeat;"
+        "background-position:center,center;"
+        "background-size:cover,200px 200px;"
+    ) if _WATERMARK_B64 else "background:#282a36;"
     return (
         "<!DOCTYPE html><html><body style='"
-        "background:#282a36;color:#6272a4;font-family:sans-serif;"
+        f"{watermark}color:#6272a4;font-family:sans-serif;"
         "display:flex;align-items:center;justify-content:center;height:100%;margin:0'>"
-        f"<p style='font-size:14px'>{message}</p></body></html>"
+        f"<p style='font-size:14px;position:relative'>{message}</p></body></html>"
     )

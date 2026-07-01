@@ -30,6 +30,7 @@ from PySide6.QtWebEngineCore import (
     QWebEngineDownloadRequest,
 )
 import os
+import base64
 from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
@@ -99,6 +100,30 @@ _GRID_TOGGLE_JS = """
 """
 
 
+def _load_watermark_b64():
+    """Base64-encode the branding watermark once; empty string if missing."""
+    path = os.path.join(os.path.dirname(__file__), "myotion_resources", "myotion_logo_origin.png")
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii")
+    except OSError:
+        return ""
+
+
+_WATERMARK_B64 = _load_watermark_b64()
+
+# Blank-state HTML: a faint, centered logo watermark on white so an empty plot
+# doesn't read as broken while staying out of the way once real data is shown.
+_BLANK_HTML = (
+    "<html><body style='margin:0;height:100%;background-color:#ffffff;"
+    "background-image:linear-gradient(rgba(255,255,255,0.88),rgba(255,255,255,0.88)),"
+    "url(data:image/png;base64,{});"
+    "background-repeat:no-repeat,no-repeat;"
+    "background-position:center,center;"
+    "background-size:cover,220px 220px;'></body></html>"
+).format(_WATERMARK_B64) if _WATERMARK_B64 else "<html><body></body></html>"
+
+
 # html load handler with custom scheme
 class UrlSchemeHandler(QWebEngineUrlSchemeHandler):
     def __init__(self, parent):
@@ -141,7 +166,7 @@ class QPlotView(QWebEngineView):
 
         # install handler — parent = profile, not self
         self.schemeHandler = UrlSchemeHandler(self.profile)
-        self.schemeHandler.setHtml("<html><body></body></html>")
+        self.schemeHandler.setHtml(_BLANK_HTML)
         self.profile.installUrlSchemeHandler(
             bytes(URL_SCHEME, "ascii"), self.schemeHandler
         )
@@ -325,8 +350,7 @@ class QPlotView(QWebEngineView):
         self.update()
 
     def hide(self):
-        html = "<html><body></body></html>"
-        self.setHtml(html)
+        self.setHtml(_BLANK_HTML)
         self.update()
 
 
