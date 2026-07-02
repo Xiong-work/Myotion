@@ -27,6 +27,11 @@ class workspace:
             self.loading = False
             self.extra_events = []  # user-created TrialEvents, persisted to workspace XML
             self.crop_interval = None  # (t_start_s, t_end_s) or None; shared by EMG and kinematics
+            # Path to a separately-recorded/stitched kinematics file, when this
+            # participant's kinematics didn't come from the same file as their EMG
+            # (see Kinematics Inspection's "Attach a kinematics file" flow). None
+            # means "use emg.emgFile", preserving today's single-file behavior.
+            self.kinematic_file = None
 
         def isLoading(self):
             return self.loading
@@ -64,6 +69,8 @@ class workspace:
                 ci.addNode("start", xmlString(float(self.crop_interval[0])))
                 ci.addNode("end", xmlString(float(self.crop_interval[1])))
                 root.addSubTree(ci)
+            if self.kinematic_file:
+                root.addNode("kinematic_file", xmlString(self.kinematic_file))
             return root
 
         @staticmethod
@@ -117,6 +124,12 @@ class workspace:
                         profile_obj.crop_interval = (float(s_el.text), float(e_el.text))
                 except Exception:
                     pass
+            # Restore attached-kinematics-file path, if this participant's
+            # kinematics was stitched/attached separately from their EMG file
+            profile_obj.kinematic_file = None
+            kf_node = root.find("kinematic_file")
+            if kf_node is not None and kf_node.text:
+                profile_obj.kinematic_file = xmlStringParse(kf_node.text)
             return profile_obj
 
     class reportEMGConfig:
@@ -531,8 +544,18 @@ class workspace:
                         )
                     )
                     asyncio.run(profile.emg.async_load())
-                # load kinematics data
-                profile.kinematic = kinematic(profile.emg.emgFile)
+                # load kinematics data — from a separately attached/stitched file
+                # when one is set (see Kinematics Inspection's "Attach a
+                # kinematics file" flow), otherwise the same file as the EMG
+                kin_file = profile.kinematic_file
+                if not (kin_file and os.path.isfile(str(kin_file))):
+                    if kin_file:
+                        logger.warning(
+                            "emg async loader: attached kinematics file missing "
+                            "for {}: {}, falling back to EMG file".format(name, kin_file)
+                        )
+                    kin_file = profile.emg.emgFile
+                profile.kinematic = kinematic(kin_file)
                 logger.info("emg async loader: done")
                 profile.loading = False
                 doneCallback()

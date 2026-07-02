@@ -40,7 +40,9 @@ class Controller:
         self._save_callback = save_callback
         self._export_events_callback = export_events_callback
 
-        self.render.setModel(model.kinematic)
+        # No markers to render for an EMG-only participant — leave the 3D pane
+        # showing its "no model" placeholder rather than an empty scene.
+        self.render.setModel(model.kinematic if model.has_kinematics else None)
         self.render.setController(self)
 
         self.playbar.setController(self)
@@ -88,6 +90,36 @@ class Controller:
         for fp in self.model.force_plates:
             for comp in ("Fx", "Fy", "Fz"):
                 self._force_channels["Plate{} {}".format(fp.plate_id, comp)] = (fp, comp)
+
+    def stop(self):
+        """Disconnect every signal this controller connected and stop its timer.
+
+        Each participant load builds a brand new Controller against the same
+        shared widgets (playbar, renderWidget, kinematics_label_tree) without
+        ever tearing down the previous one — left alone, old timers keep
+        ticking and old handlers keep firing (e.g. duplicate tree_item_select
+        calls, or an old timer repainting the render widget with a stale
+        frame) on top of whatever loads next. main.py.loadKinemtic() calls
+        this on the previously-active controller before creating a new one.
+        """
+        self.timer.stop()
+        for signal, slot in (
+            (self.timer.timeout, self.update),
+            (self.playbar.slider.valueChanged, self.slider_valuechange),
+            (self.playbar.playbutton.clicked, self.on_play_button_clicked),
+            (self.playbar.prevFrameButton.clicked, self.on_prev_frame_button_clicked),
+            (self.playbar.nextFrameButton.clicked, self.on_next_frame_button_clicked),
+            (self.playbar.step.currentTextChanged, self.on_combo_box_changed),
+            (self.playbar.eventMarkRequested, self._onMarkEvent),
+            (self.playbar.exportEventsRequested, self._onExportEvents),
+            (self.playbar.onsetDetectionToggled, self._onOnsetDetectionToggled),
+            (self.labeltree.itemDoubleClicked, self.tree_item_select),
+            (self.labeltree.customContextMenuRequested, self._on_tree_context_menu),
+        ):
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass  # already disconnected
 
     def update(self):
         if self.playbar.is_playing():
@@ -140,7 +172,7 @@ class Controller:
         self.top.clear()
         name = index.text(0)
         do_filter = self.playbar.filterCheck.isChecked()
-        if name in self.model.kinematic.data.data:
+        if self.model.has_kinematics and name in self.model.kinematic.data.data:
             d = self.model.kinematic.data[name]
             xs, ys, zs = [], [], []
             for p in d:
@@ -161,7 +193,7 @@ class Controller:
             y_arr = self.model.emg.get_kinematics_display(name)
             fs_emg = self.model.emg.getfs()
             x = list(np.arange(len(y_arr)) / fs_emg)
-            rate = self.model.kinematic.point_fs
+            rate = self.model.kinematic_frame_rate()
             self.top.add_line(x, list(y_arr), name, 'channel', rate)
             # Cache for onset detection button
             self._current_emg_channel = name
@@ -177,7 +209,7 @@ class Controller:
             if do_filter:
                 data = self._apply_filter(data, fp.fs, cutoff_hz=10.0, order=4)
             x_time = list(np.arange(len(data)) / fp.fs)
-            point_fs = self.model.kinematic.point_fs
+            point_fs = self.model.kinematic_frame_rate()
             self.top.add_line(x_time, list(data), name, "channel", point_fs)
         # Re-draw events on the freshly populated plots
         for ev in self.model.events:
