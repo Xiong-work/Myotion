@@ -21,13 +21,17 @@ from PySide6.QtWidgets import (
     QLineEdit, QCheckBox, QColorDialog, QDialog,
 )
 
+import os
+
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from modules.pyMotion.core.batch_io import load_external_folder
-from modules.pyMotion.core.batch_dataset import BatchDataset
-from modules.pyMotion.core.synergy import prepare_synergy_input, extract_synergies
+from modules.pyMotion.core.batch_dataset import BatchDataset, subset_cycles
+from modules.pyMotion.core.synergy import (
+    prepare_synergy_input, extract_synergies, classify_kmeans, group_synergy_summary,
+)
 from modules.pyMotion.core.timeSeriesTable import timeSeriesTable
 from .chart_view import AdvancedChartView
 
@@ -46,6 +50,11 @@ _SERIES_PALETTE = [
     "#f1fa8c", "#ffb86c", "#ff79c6", "#8be9c1", "#6272a4",
 ]
 
+# Synthetic entry injected into the Participant combo (Synergy analysis
+# only, only once classification has run) so the group-level consensus plot
+# is reachable from the same dropdown used to pick an individual participant.
+GROUP_SUMMARY_LABEL = "— Group Summary (all participants) —"
+
 
 class AdvancedAnalysisWidget(QWidget):
     def __init__(self, parent=None):
@@ -56,11 +65,19 @@ class AdvancedAnalysisWidget(QWidget):
         self._prepared_cache = {}    # trial_name -> enveloped BatchTrial
         self._cci_results = {}       # trial_name -> (scalar, curve, signal_a, signal_b)
         self._cci_muscles = None     # (chan_a, chan_b) for the current _cci_results
-        self._synergy_results = {}   # trial_name -> MusclesyneRgies
+        self._synergy_results = {}   # trial_name -> MusclesyneRgies (raw, per-trial NMF)
+        self._synergy_classified = {}  # trial_name -> MusclesyneRgies (classify_kmeans output, if run)
+        self._synergy_n_points = None  # points/cycle actually used for the last synergy run (shared across trials)
         # User-editable plot appearance; empty title/xlabel/ylabel fall back to
         # the analysis-computed defaults. Applied to whichever chart is current.
+        # xlabel/ylabel are for CCI's single-plot chart; Synergy's dual-subplot
+        # (weight + activation) chart has its own axis pair per subplot, since
+        # the two panels have unrelated axes (muscle name vs. time, a.u. vs.
+        # a.u.) that a single X/Y label pair can't sensibly describe.
         self._chart_style = {
             "title": "", "show_title": True, "xlabel": "", "ylabel": "",
+            "syn_weight_xlabel": "", "syn_weight_ylabel": "",
+            "syn_activation_xlabel": "", "syn_activation_ylabel": "",
             "show_legend": True, "line_dash": "solid",
             "series_colors": {},   # series name -> explicit hex override
             "bg_color": "#282a36",
@@ -140,6 +157,24 @@ class AdvancedAnalysisWidget(QWidget):
         self._status_label.setWordWrap(True)
         vl.addWidget(self._status_label)
 
+        vl.addWidget(self._lbl("Cycles to include", bold=True))
+        row_cyc = QHBoxLayout()
+        row_cyc.addWidget(self._lbl("Start", size=11, color="#6272a4"))
+        self._cycle_start_spin = QSpinBox()
+        self._cycle_start_spin.setRange(1, 999)
+        self._cycle_start_spin.setValue(1)
+        row_cyc.addWidget(self._cycle_start_spin)
+        row_cyc.addWidget(self._lbl("Max", size=11, color="#6272a4"))
+        self._cycle_max_spin = QSpinBox()
+        self._cycle_max_spin.setRange(0, 999)
+        self._cycle_max_spin.setValue(0)
+        self._cycle_max_spin.setSpecialValueText("All")
+        row_cyc.addWidget(self._cycle_max_spin)
+        vl.addLayout(row_cyc)
+        self._cycle_range_note = self._lbl("", size=10, color="#6272a4")
+        self._cycle_range_note.setWordWrap(True)
+        vl.addWidget(self._cycle_range_note)
+
         vl.addSpacing(6)
         line = QLabel()
         line.setFixedHeight(1)
@@ -186,6 +221,58 @@ class AdvancedAnalysisWidget(QWidget):
         vl.addStretch()
         return panel
 
+    def _build_single_axis_labels_page(self):
+        page = QWidget()
+        vl = QVBoxLayout(page)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(6)
+
+        vl.addWidget(self._lbl("X-axis label", size=11, color="#6272a4"))
+        self._style_xlabel_edit = QLineEdit()
+        self._style_xlabel_edit.setPlaceholderText("(auto)")
+        self._style_xlabel_edit.editingFinished.connect(self._on_style_changed)
+        vl.addWidget(self._style_xlabel_edit)
+
+        vl.addWidget(self._lbl("Y-axis label", size=11, color="#6272a4"))
+        self._style_ylabel_edit = QLineEdit()
+        self._style_ylabel_edit.setPlaceholderText("(auto)")
+        self._style_ylabel_edit.editingFinished.connect(self._on_style_changed)
+        vl.addWidget(self._style_ylabel_edit)
+
+        return page
+
+    def _build_synergy_axis_labels_page(self):
+        page = QWidget()
+        vl = QVBoxLayout(page)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(4)
+
+        vl.addWidget(self._lbl("Weight (M) axes", size=10, color="#6272a4"))
+        row_w = QHBoxLayout()
+        self._style_syn_weight_xlabel_edit = QLineEdit()
+        self._style_syn_weight_xlabel_edit.setPlaceholderText("X (auto)")
+        self._style_syn_weight_xlabel_edit.editingFinished.connect(self._on_style_changed)
+        row_w.addWidget(self._style_syn_weight_xlabel_edit)
+        self._style_syn_weight_ylabel_edit = QLineEdit()
+        self._style_syn_weight_ylabel_edit.setPlaceholderText("Y (auto)")
+        self._style_syn_weight_ylabel_edit.editingFinished.connect(self._on_style_changed)
+        row_w.addWidget(self._style_syn_weight_ylabel_edit)
+        vl.addLayout(row_w)
+
+        vl.addWidget(self._lbl("Activation (P) axes", size=10, color="#6272a4"))
+        row_a = QHBoxLayout()
+        self._style_syn_activation_xlabel_edit = QLineEdit()
+        self._style_syn_activation_xlabel_edit.setPlaceholderText("X (auto)")
+        self._style_syn_activation_xlabel_edit.editingFinished.connect(self._on_style_changed)
+        row_a.addWidget(self._style_syn_activation_xlabel_edit)
+        self._style_syn_activation_ylabel_edit = QLineEdit()
+        self._style_syn_activation_ylabel_edit.setPlaceholderText("Y (auto)")
+        self._style_syn_activation_ylabel_edit.editingFinished.connect(self._on_style_changed)
+        row_a.addWidget(self._style_syn_activation_ylabel_edit)
+        vl.addLayout(row_a)
+
+        return page
+
     def _build_style_panel(self):
         page = QWidget()
         vl = QVBoxLayout(page)
@@ -206,17 +293,13 @@ class AdvancedAnalysisWidget(QWidget):
         self._style_title_edit.editingFinished.connect(self._on_style_changed)
         vl.addWidget(self._style_title_edit)
 
-        vl.addWidget(self._lbl("X-axis label", size=11, color="#6272a4"))
-        self._style_xlabel_edit = QLineEdit()
-        self._style_xlabel_edit.setPlaceholderText("(auto)")
-        self._style_xlabel_edit.editingFinished.connect(self._on_style_changed)
-        vl.addWidget(self._style_xlabel_edit)
-
-        vl.addWidget(self._lbl("Y-axis label", size=11, color="#6272a4"))
-        self._style_ylabel_edit = QLineEdit()
-        self._style_ylabel_edit.setPlaceholderText("(auto)")
-        self._style_ylabel_edit.editingFinished.connect(self._on_style_changed)
-        vl.addWidget(self._style_ylabel_edit)
+        # CCI is one plot -> one X/Y label pair. Synergy is two subplots
+        # (weight vs. activation) with unrelated axes -> its own pair each.
+        # Switched by _on_analysis_changed() to match the active analysis.
+        self._style_axis_stack = QStackedWidget()
+        self._style_axis_stack.addWidget(self._build_single_axis_labels_page())
+        self._style_axis_stack.addWidget(self._build_synergy_axis_labels_page())
+        vl.addWidget(self._style_axis_stack)
 
         row_line = QHBoxLayout()
         self._style_line_combo = QComboBox()
@@ -357,6 +440,10 @@ class AdvancedAnalysisWidget(QWidget):
         self._chart_style["title"] = self._style_title_edit.text().strip()
         self._chart_style["xlabel"] = self._style_xlabel_edit.text().strip()
         self._chart_style["ylabel"] = self._style_ylabel_edit.text().strip()
+        self._chart_style["syn_weight_xlabel"] = self._style_syn_weight_xlabel_edit.text().strip()
+        self._chart_style["syn_weight_ylabel"] = self._style_syn_weight_ylabel_edit.text().strip()
+        self._chart_style["syn_activation_xlabel"] = self._style_syn_activation_xlabel_edit.text().strip()
+        self._chart_style["syn_activation_ylabel"] = self._style_syn_activation_ylabel_edit.text().strip()
         self._chart_style["show_legend"] = self._style_legend_check.isChecked()
         dash_map = {0: "solid", 1: "dash", 2: "dot", 3: "dashdot"}
         self._chart_style["line_dash"] = dash_map[self._style_line_combo.currentIndex()]
@@ -371,7 +458,8 @@ class AdvancedAnalysisWidget(QWidget):
         vl.addWidget(self._lbl("cycles/ folder", size=11, color="#6272a4"))
         row1 = QHBoxLayout()
         self._cycles_path_label = self._lbl("(not set)", size=11)
-        self._cycles_path_label.setWordWrap(True)
+        self._cycles_path_label.setWordWrap(False)
+        self._cycles_path_label.setToolTip("Hover to see the full path once set.")
         btn_cycles = QPushButton("Browse...")
         self._style_button(btn_cycles)
         btn_cycles.clicked.connect(self._browse_cycles_folder)
@@ -382,7 +470,8 @@ class AdvancedAnalysisWidget(QWidget):
         vl.addWidget(self._lbl("emg/ folder", size=11, color="#6272a4"))
         row2 = QHBoxLayout()
         self._emg_path_label = self._lbl("(not set)", size=11)
-        self._emg_path_label.setWordWrap(True)
+        self._emg_path_label.setWordWrap(False)
+        self._emg_path_label.setToolTip("Hover to see the full path once set.")
         btn_emg = QPushButton("Browse...")
         self._style_button(btn_emg)
         btn_emg.clicked.connect(self._browse_emg_folder)
@@ -436,15 +525,21 @@ class AdvancedAnalysisWidget(QWidget):
         vl.setContentsMargins(0, 6, 0, 6)
         vl.setSpacing(6)
 
-        vl.addWidget(self._lbl("Muscle A", size=11, color="#6272a4"))
+        row_muscles = QHBoxLayout()
+        col_a = QVBoxLayout()
+        col_a.addWidget(self._lbl("Muscle A", size=11, color="#6272a4"))
         self._cci_muscle_a = QComboBox()
         self._style_combo(self._cci_muscle_a)
-        vl.addWidget(self._cci_muscle_a)
+        col_a.addWidget(self._cci_muscle_a)
+        row_muscles.addLayout(col_a)
 
-        vl.addWidget(self._lbl("Muscle B", size=11, color="#6272a4"))
+        col_b = QVBoxLayout()
+        col_b.addWidget(self._lbl("Muscle B", size=11, color="#6272a4"))
         self._cci_muscle_b = QComboBox()
         self._style_combo(self._cci_muscle_b)
-        vl.addWidget(self._cci_muscle_b)
+        col_b.addWidget(self._cci_muscle_b)
+        row_muscles.addLayout(col_b)
+        vl.addLayout(row_muscles)
 
         vl.addWidget(self._lbl("Method", size=11, color="#6272a4"))
         self._cci_method_combo = QComboBox()
@@ -462,6 +557,34 @@ class AdvancedAnalysisWidget(QWidget):
         vl.setContentsMargins(0, 6, 0, 6)
         vl.setSpacing(6)
 
+        self._btn_synergy_settings = QPushButton("Synergy Settings...")
+        self._style_button(self._btn_synergy_settings)
+        self._btn_synergy_settings.clicked.connect(self._open_synergy_settings_dialog)
+        vl.addWidget(self._btn_synergy_settings)
+
+        self._syn_summary_label = self._lbl("", size=10, color="#6272a4")
+        self._syn_summary_label.setWordWrap(True)
+        vl.addWidget(self._syn_summary_label)
+
+        self._build_synergy_settings_dialog()
+        self._update_synergy_summary()
+
+        vl.addStretch()
+        return page
+
+    def _build_synergy_settings_dialog(self):
+        """Rank/classification parameters, in their own popup instead of the
+        (too narrow to be usable) left panel -- same rationale as the Plot
+        Colors popup. Defaults match what a fresh run would previously use
+        inline, so opening the dialog isn't required before running."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Synergy Settings")
+        dlg.setModal(False)
+        dlg.setStyleSheet("background:#282a36;")
+        vl = QVBoxLayout(dlg)
+        vl.setContentsMargins(12, 12, 12, 12)
+        vl.setSpacing(6)
+
         vl.addWidget(self._lbl("Rank selection", size=11, color="#6272a4"))
         self._syn_rank_combo = QComboBox()
         self._syn_rank_combo.addItems(["Automatic", "Fixed"])
@@ -474,12 +597,14 @@ class AdvancedAnalysisWidget(QWidget):
         self._syn_fixed_rank_spin.setRange(1, 20)
         self._syn_fixed_rank_spin.setValue(3)
         self._syn_fixed_rank_spin.setEnabled(False)
+        self._syn_fixed_rank_spin.valueChanged.connect(self._update_synergy_summary)
         vl.addWidget(self._syn_fixed_rank_spin)
 
         vl.addWidget(self._lbl("Points per cycle (0-100%)", size=11, color="#6272a4"))
         self._syn_npoints_spin = QSpinBox()
         self._syn_npoints_spin.setRange(11, 501)
         self._syn_npoints_spin.setValue(101)
+        self._syn_npoints_spin.valueChanged.connect(self._update_synergy_summary)
         vl.addWidget(self._syn_npoints_spin)
 
         note = self._lbl(
@@ -490,8 +615,57 @@ class AdvancedAnalysisWidget(QWidget):
         note.setWordWrap(True)
         vl.addWidget(note)
 
+        vl.addSpacing(4)
+        self._syn_classify_check = QCheckBox("Classify synergies across participants")
+        self._syn_classify_check.setChecked(True)
+        self._syn_classify_check.setStyleSheet("color:#f8f8f2;font-size:12px;")
+        self._syn_classify_check.stateChanged.connect(self._update_synergy_summary)
+        vl.addWidget(self._syn_classify_check)
+
+        row_clust = QHBoxLayout()
+        row_clust.addWidget(self._lbl("Clusters", size=11, color="#6272a4"))
+        self._syn_clusters_spin = QSpinBox()
+        self._syn_clusters_spin.setRange(0, 20)
+        self._syn_clusters_spin.setValue(0)
+        self._syn_clusters_spin.setSpecialValueText("Auto")
+        self._syn_clusters_spin.valueChanged.connect(self._update_synergy_summary)
+        row_clust.addWidget(self._syn_clusters_spin)
+        vl.addLayout(row_clust)
+
+        classify_note = self._lbl(
+            "Each trial's synergies are numbered independently, so \"Syn1\" "
+            "in one trial isn't necessarily the same synergy as \"Syn1\" in "
+            "another. Classification relabels them consistently across all "
+            "loaded participants; needs a decent number of trials (10+) to "
+            "work well. Synergies that can't be matched confidently are "
+            "labeled \"Syncombined\".",
+            size=10, color="#6272a4",
+        )
+        classify_note.setWordWrap(True)
+        vl.addWidget(classify_note)
         vl.addStretch()
-        return page
+
+        btn_close = QPushButton("Close")
+        self._style_button(btn_close)
+        btn_close.clicked.connect(dlg.hide)
+        vl.addWidget(btn_close)
+
+        dlg.setMinimumWidth(260)
+        self._synergy_settings_dialog = dlg
+
+    def _open_synergy_settings_dialog(self):
+        self._synergy_settings_dialog.show()
+        self._synergy_settings_dialog.raise_()
+        self._synergy_settings_dialog.activateWindow()
+
+    def _update_synergy_summary(self, *_args):
+        rank = "Automatic" if self._syn_rank_combo.currentIndex() == 0 else f"Fixed ({self._syn_fixed_rank_spin.value()})"
+        classify = "on" if self._syn_classify_check.isChecked() else "off"
+        clusters = "auto" if self._syn_clusters_spin.value() == 0 else str(self._syn_clusters_spin.value())
+        self._syn_summary_label.setText(
+            f"Rank: {rank}  |  Points/cycle: {self._syn_npoints_spin.value()}\n"
+            f"Classify: {classify} (clusters: {clusters})"
+        )
 
     def _build_right_panel(self):
         panel = QWidget()
@@ -501,12 +675,21 @@ class AdvancedAnalysisWidget(QWidget):
         vl.setSpacing(8)
 
         top = QHBoxLayout()
-        top.addWidget(self._lbl("Trial:"))
+        top.addWidget(self._lbl("Participant:"))
         self._trial_combo = QComboBox()
         self._trial_combo.setMinimumWidth(140)
         self._style_combo(self._trial_combo)
         self._trial_combo.currentIndexChanged.connect(self._on_trial_selected)
         top.addWidget(self._trial_combo)
+
+        top.addWidget(self._lbl("Repetition:"))
+        self._rep_combo = QComboBox()
+        self._rep_combo.setMinimumWidth(90)
+        self._style_combo(self._rep_combo)
+        self._rep_combo.addItem("All")
+        self._rep_combo.setEnabled(False)
+        self._rep_combo.currentIndexChanged.connect(self._on_repetition_selected)
+        top.addWidget(self._rep_combo)
         top.addStretch()
         self._btn_clear_plot = QPushButton("Clear Plot")
         self._style_button(self._btn_clear_plot)
@@ -559,13 +742,15 @@ class AdvancedAnalysisWidget(QWidget):
         path = QFileDialog.getExistingDirectory(self, "Select cycles/ folder")
         if path:
             self._cycles_path = path
-            self._cycles_path_label.setText(path)
+            self._cycles_path_label.setText(os.path.basename(path.rstrip("/\\")) or path)
+            self._cycles_path_label.setToolTip(path)
 
     def _browse_emg_folder(self):
         path = QFileDialog.getExistingDirectory(self, "Select emg/ folder")
         if path:
             self._emg_path = path
-            self._emg_path_label.setText(path)
+            self._emg_path_label.setText(os.path.basename(path.rstrip("/\\")) or path)
+            self._emg_path_label.setToolTip(path)
 
     def _load_external_folder(self):
         if not self._cycles_path or not self._emg_path:
@@ -592,11 +777,14 @@ class AdvancedAnalysisWidget(QWidget):
         self._prepared_cache.clear()
         self._cci_results.clear()
         self._synergy_results.clear()
+        self._synergy_classified.clear()
 
         self._trial_combo.blockSignals(True)
         self._trial_combo.clear()
         self._trial_combo.addItems(dataset.names)
         self._trial_combo.blockSignals(False)
+        self._refresh_rep_combo()
+        self._sync_group_summary_option()
 
         first_trial = dataset[dataset.names[0]]
         muscles = first_trial.emg.labels
@@ -611,6 +799,23 @@ class AdvancedAnalysisWidget(QWidget):
         self._status_label.setText(
             f"Loaded {len(dataset)} trial(s), {len(muscles)} channel(s) each."
         )
+
+        cycle_counts = [len(t.cycles) for t in dataset]
+        min_cyc, max_cyc = min(cycle_counts), max(cycle_counts)
+        self._cycle_start_spin.blockSignals(True)
+        self._cycle_start_spin.setValue(1)
+        self._cycle_start_spin.blockSignals(False)
+        self._cycle_max_spin.blockSignals(True)
+        self._cycle_max_spin.setValue(0)  # "All"
+        self._cycle_max_spin.blockSignals(False)
+        if min_cyc == max_cyc:
+            self._cycle_range_note.setText(f"Each trial has {min_cyc} cycle(s).")
+        else:
+            self._cycle_range_note.setText(
+                f"Trials have {min_cyc}-{max_cyc} cycles each -- Start/Max are "
+                "clipped per trial if a trial has fewer than requested."
+            )
+
         self._btn_run.setEnabled(True)
         self._chart_view.show_placeholder("Choose an analysis and click Run Analysis.")
         self._result_table.setRowCount(0)
@@ -623,15 +828,56 @@ class AdvancedAnalysisWidget(QWidget):
         self._param_stack.setCurrentIndex(idx)
         self._result_table.setRowCount(0)
         self._result_table.setColumnCount(0)
+        self._refresh_rep_combo()
+        self._sync_group_summary_option()
+        self._style_axis_stack.setCurrentIndex(1 if idx == 1 else 0)
         self._update_chart()
+
+    def _sync_group_summary_option(self):
+        """Add/remove the synthetic "Group Summary" entry from the
+        Participant combo -- only shown for Synergy analysis once a
+        classified batch result actually exists."""
+        show_group = self._analysis_combo.currentIndex() == 1 and bool(self._synergy_classified)
+        idx = self._trial_combo.findText(GROUP_SUMMARY_LABEL)
+        if show_group and idx < 0:
+            self._trial_combo.blockSignals(True)
+            self._trial_combo.insertItem(0, GROUP_SUMMARY_LABEL)
+            self._trial_combo.setCurrentIndex(0)
+            self._trial_combo.blockSignals(False)
+        elif not show_group and idx >= 0:
+            self._trial_combo.blockSignals(True)
+            self._trial_combo.removeItem(idx)
+            if self._trial_combo.count() > 0:
+                self._trial_combo.setCurrentIndex(0)
+            self._trial_combo.blockSignals(False)
 
     def _on_rank_mode_changed(self, idx):
         self._syn_fixed_rank_spin.setEnabled(idx == 1)
+        self._update_synergy_summary()
 
     def _get_prepared(self, trial):
         if trial.name not in self._prepared_cache:
             self._prepared_cache[trial.name] = prepare_synergy_input(trial)
         return self._prepared_cache[trial.name]
+
+    def _get_prepared_subset(self, trial):
+        """Preprocessed trial, restricted to the "Cycles to include" range.
+
+        Preprocessing (filter/envelope/normalize) always runs on the full
+        trial -- only which cycles feed the downstream analysis is
+        restricted here, applied fresh on every run so Start/Max can be
+        changed without reloading the folder.
+        """
+        prepared = self._get_prepared(trial)
+        cy_start = self._cycle_start_spin.value()
+        cy_max = self._cycle_max_spin.value()  # 0 == "All"
+        subset = subset_cycles(prepared, cy_start, cy_max)
+        if len(subset.cycles) == 0:
+            raise ValueError(
+                f"trial '{trial.name}' has no cycles left after applying "
+                f"Start={cy_start}/Max={cy_max or 'All'}"
+            )
+        return subset
 
     # ── run analysis ─────────────────────────────────────────────────────
 
@@ -663,12 +909,12 @@ class AdvancedAnalysisWidget(QWidget):
         n_points = 101
         try:
             for trial in self._dataset:
-                prepared = self._get_prepared(trial)
+                prepared = self._get_prepared_subset(trial)
                 a = prepared.emg.timeNormalizeCycles(chan_a, prepared.cycles, n_points).flatten()
                 b = prepared.emg.timeNormalizeCycles(chan_b, prepared.cycles, n_points).flatten()
                 tmp = timeSeriesTable(1.0, [chan_a, chan_b], {chan_a: a, chan_b: b})
                 curve = tmp.cocontractionCurve(chan_a, chan_b, method_key)
-                self._cci_results[trial.name] = (float(np.mean(curve)), curve, a, b)
+                self._cci_results[trial.name] = (float(np.mean(curve)), curve, a, b, len(prepared.cycles))
         except Exception as e:
             QMessageBox.critical(self, "Co-contraction Failed", str(e))
             self._status_label.setText("Co-contraction analysis failed.")
@@ -676,6 +922,7 @@ class AdvancedAnalysisWidget(QWidget):
 
         self._status_label.setText(f"Co-contraction computed for {len(self._cci_results)} trial(s).")
         self._populate_cci_table(chan_a, chan_b)
+        self._refresh_rep_combo()
         self._update_chart()
 
     def _populate_cci_table(self, chan_a, chan_b):
@@ -685,7 +932,7 @@ class AdvancedAnalysisWidget(QWidget):
         names = sorted(self._cci_results.keys())
         self._result_table.setRowCount(len(names))
         for r, name in enumerate(names):
-            scalar, _curve, _a, _b = self._cci_results[name]
+            scalar, _curve, _a, _b, _n_reps = self._cci_results[name]
             self._result_table.setItem(r, 0, QTableWidgetItem(name))
             self._result_table.setItem(r, 1, QTableWidgetItem(f"{scalar:.4f}"))
         self._result_table.resizeColumnsToContents()
@@ -699,9 +946,10 @@ class AdvancedAnalysisWidget(QWidget):
         QApplication.processEvents()
 
         self._synergy_results.clear()
+        self._synergy_classified.clear()
         try:
             for trial in self._dataset:
-                prepared = self._get_prepared(trial)
+                prepared = self._get_prepared_subset(trial)
                 result = extract_synergies(prepared, n_points=n_points, fixed_syns=fixed_syns)
                 self._synergy_results[trial.name] = result
                 self._status_label.setText(
@@ -712,15 +960,45 @@ class AdvancedAnalysisWidget(QWidget):
             QMessageBox.critical(self, "Synergy Analysis Failed", str(e))
             self._status_label.setText("Synergy analysis failed.")
             return
+        self._synergy_n_points = n_points
 
-        self._status_label.setText(
-            f"Synergy analysis computed for {len(self._synergy_results)} trial(s)."
-        )
+        base_status = f"Synergy analysis computed for {len(self._synergy_results)} trial(s)."
+        if self._syn_classify_check.isChecked() and len(self._synergy_results) >= 2:
+            self._status_label.setText(base_status + " Classifying across participants...")
+            QApplication.processEvents()
+            try:
+                clusters = self._syn_clusters_spin.value() or None
+                self._synergy_classified = classify_kmeans(
+                    self._synergy_results, n_points=n_points, clusters=clusters,
+                )
+                total = sum(r.syns for r in self._synergy_results.values())
+                combined = sum(
+                    sum(1 for s in r.syn_names if "combined" in s)
+                    for r in self._synergy_classified.values()
+                )
+                self._status_label.setText(
+                    f"{base_status} Classified across participants "
+                    f"({total - combined}/{total} synergies matched, {combined} combined)."
+                )
+            except Exception as e:
+                self._synergy_classified.clear()
+                self._status_label.setText(base_status + " Classification failed -- showing per-trial results.")
+                QMessageBox.warning(
+                    self, "Classification Failed",
+                    f"Synergy extraction succeeded but cross-trial classification failed:\n{e}\n\n"
+                    "Showing per-trial (unclassified) results instead.",
+                )
+        else:
+            self._status_label.setText(base_status)
+
         self._populate_synergy_table()
+        self._sync_group_summary_option()
+        self._refresh_rep_combo()
         self._update_chart()
 
     def _populate_synergy_table(self):
-        cols = ["Trial", "# Synergies", "R2"]
+        has_classification = bool(self._synergy_classified)
+        cols = ["Trial", "# Synergies", "R2"] + (["Combined"] if has_classification else [])
         self._result_table.setColumnCount(len(cols))
         self._result_table.setHorizontalHeaderLabels(cols)
         names = sorted(self._synergy_results.keys())
@@ -731,12 +1009,52 @@ class AdvancedAnalysisWidget(QWidget):
             self._result_table.setItem(r, 0, QTableWidgetItem(name))
             self._result_table.setItem(r, 1, QTableWidgetItem(str(result.syns)))
             self._result_table.setItem(r, 2, QTableWidgetItem(f"{r2:.4f}"))
+            if has_classification:
+                classified = self._synergy_classified.get(name)
+                n_combined = sum(1 for s in classified.syn_names if "combined" in s) if classified else 0
+                self._result_table.setItem(r, 3, QTableWidgetItem(str(n_combined)))
         self._result_table.resizeColumnsToContents()
 
     # ── chart ────────────────────────────────────────────────────────────
 
     def _on_trial_selected(self, _idx):
+        self._refresh_rep_combo()
         self._update_chart()
+
+    def _on_repetition_selected(self, _idx):
+        self._update_chart()
+
+    def _refresh_rep_combo(self):
+        """Populate Repetition with "All" + one entry per rep actually used
+        for the selected participant's last run. For Synergy, this only
+        affects the activation-pattern (P) subplot when displayed -- the
+        muscle-weighting matrix (M) is a single fit across all reps and has
+        no per-rep meaning, so it always shows the full-trial fit regardless
+        of Repetition. Disabled for the synthetic Group Summary entry, which
+        is itself an average across every participant's every rep."""
+        trial_name = self._trial_combo.currentText()
+        n_reps = None
+        analysis_idx = self._analysis_combo.currentIndex()
+        if analysis_idx == 0 and trial_name in self._cci_results:
+            n_reps = self._cci_results[trial_name][4]
+        elif (
+            analysis_idx == 1 and trial_name != GROUP_SUMMARY_LABEL
+            and trial_name in self._synergy_results and self._synergy_n_points
+        ):
+            result = self._synergy_classified.get(trial_name) or self._synergy_results[trial_name]
+            n_reps = len(result.P) // self._synergy_n_points
+
+        self._rep_combo.blockSignals(True)
+        self._rep_combo.clear()
+        self._rep_combo.addItem("All")
+        if n_reps:
+            for i in range(1, n_reps + 1):
+                self._rep_combo.addItem(f"Rep {i}")
+            self._rep_combo.setEnabled(True)
+        else:
+            self._rep_combo.setEnabled(False)
+        self._rep_combo.setCurrentIndex(0)
+        self._rep_combo.blockSignals(False)
 
     def _clear_chart(self):
         self._chart_view.show_placeholder("Load a data source, then run an analysis.")
@@ -752,6 +1070,8 @@ class AdvancedAnalysisWidget(QWidget):
         analysis_idx = self._analysis_combo.currentIndex()
         if analysis_idx == 0 and trial_name in self._cci_results:
             self._show_cci_chart(trial_name)
+        elif analysis_idx == 1 and trial_name == GROUP_SUMMARY_LABEL and self._synergy_classified:
+            self._show_group_synergy_chart()
         elif analysis_idx == 1 and trial_name in self._synergy_results:
             self._show_synergy_chart(trial_name)
         else:
@@ -764,9 +1084,20 @@ class AdvancedAnalysisWidget(QWidget):
         r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
         return (0.299 * r + 0.587 * g + 0.114 * b) / 255
 
-    def _apply_common_style(self, fig, default_title, default_xlabel=None, default_ylabel=None):
-        """Apply the user-editable title/labels/legend/background/grid to `fig`,
-        falling back to analysis-computed defaults for anything left blank."""
+    @staticmethod
+    def _hex_to_rgba(hex_color, alpha):
+        h = hex_color.lstrip("#")
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+        return f"rgba({r},{g},{b},{alpha})"
+
+    def _apply_common_style(self, fig, default_title, xaxis_title=None, yaxis_title=None,
+                             xaxis2_title=None, yaxis2_title=None):
+        """Apply the user-editable title/legend/background/grid to `fig`,
+        plus whichever axis titles the caller resolved. xaxis2/yaxis2 only
+        matter for dual-subplot figures (Synergy's weight+activation
+        layout) -- callers resolve "user override or computed default"
+        themselves (see _chart_style's per-analysis-type label fields)
+        rather than this method reaching into style state by a fixed key."""
         st = self._chart_style
         bg = st["bg_color"]
         dark = self._bg_luminance(bg) <= 0.6
@@ -781,22 +1112,41 @@ class AdvancedAnalysisWidget(QWidget):
             showlegend=st["show_legend"],
             margin=dict(l=60, r=20, t=50, b=50),
         )
-        xlabel = st["xlabel"] or default_xlabel
-        ylabel = st["ylabel"] or default_ylabel
-        if xlabel:
-            layout_kwargs["xaxis_title"] = xlabel
-        if ylabel:
-            layout_kwargs["yaxis_title"] = ylabel
+        if xaxis_title:
+            layout_kwargs["xaxis_title"] = xaxis_title
+        if yaxis_title:
+            layout_kwargs["yaxis_title"] = yaxis_title
+        if xaxis2_title:
+            layout_kwargs["xaxis2_title"] = xaxis2_title
+        if yaxis2_title:
+            layout_kwargs["yaxis2_title"] = yaxis2_title
         fig.update_layout(**layout_kwargs)
         # No grid by default; user can toggle via the injected modebar button.
         fig.update_xaxes(showgrid=False)
         fig.update_yaxes(showgrid=False)
 
     def _show_cci_chart(self, trial_name):
-        scalar, _curve, a, b = self._cci_results[trial_name]
+        scalar_all, curve_all, a_all, b_all, n_reps = self._cci_results[trial_name]
         chan_a, chan_b = self._cci_muscles
         st = self._chart_style
         dash = None if st["line_dash"] == "solid" else st["line_dash"]
+
+        # rep_idx: 0 = "All" (every included cycle, concatenated); 1..n_reps
+        # slices out just that one cycle (same n_points block used to build
+        # the concatenated curve/a/b in _run_cci) -- CCI is recomputed from
+        # that slice, not just re-displayed, so the value matches the curve.
+        rep_idx = self._rep_combo.currentIndex() if self._rep_combo.isEnabled() else 0
+        if rep_idx > 0 and n_reps:
+            n_points = len(curve_all) // n_reps
+            i = rep_idx - 1
+            sl = slice(i * n_points, (i + 1) * n_points)
+            curve, a, b = curve_all[sl], a_all[sl], b_all[sl]
+            scalar = float(np.mean(curve))
+            title_suffix = f"rep {rep_idx}/{n_reps}"
+        else:
+            curve, a, b, scalar = curve_all, a_all, b_all, scalar_all
+            title_suffix = f"all {n_reps} rep(s)" if n_reps else "all reps"
+
         self._refresh_series_swatches([chan_a, chan_b])
         color_a = self._series_color(chan_a, 0)
         color_b = self._series_color(chan_b, 1)
@@ -817,19 +1167,38 @@ class AdvancedAnalysisWidget(QWidget):
         fig.add_trace(go.Scatter(
             x=x, y=b, mode="lines", line=dict(color=color_b, width=2, dash=dash), name=chan_b,
         ))
+        st = self._chart_style
         self._apply_common_style(
             fig,
-            default_title=f"Co-contraction — {trial_name} (mean CCI = {scalar:.4f})",
-            default_xlabel="sample (concatenated normalized cycles)",
-            default_ylabel="EMG amplitude",
+            default_title=f"Co-contraction — {trial_name}, {title_suffix} (CCI = {scalar:.4f})",
+            xaxis_title=st["xlabel"] or "sample (normalized cycle)",
+            yaxis_title=st["ylabel"] or "EMG amplitude",
         )
         self._chart_view.show_figure(fig, filename_stem=f"{trial_name}_CCI")
 
     def _show_synergy_chart(self, trial_name):
-        result = self._synergy_results[trial_name]
+        result = self._synergy_classified.get(trial_name) or self._synergy_results[trial_name]
         st = self._chart_style
         dash = None if st["line_dash"] == "solid" else st["line_dash"]
         self._refresh_series_swatches(result.syn_names)
+
+        # rep_idx: 0 = "All" (full concatenated activation pattern); 1..n_reps
+        # slices out just that cycle's segment. Only affects the activation
+        # (P) subplot -- M is a single whole-trial fit, shown unchanged
+        # regardless of Repetition (see _refresh_rep_combo's docstring).
+        rep_idx = self._rep_combo.currentIndex() if self._rep_combo.isEnabled() else 0
+        n_rows = len(result.P)
+        if rep_idx > 0 and self._synergy_n_points:
+            n_reps = n_rows // self._synergy_n_points
+            i = rep_idx - 1
+            sl = slice(i * self._synergy_n_points, (i + 1) * self._synergy_n_points)
+            p_x = np.arange(self._synergy_n_points)
+            rep_suffix = f", rep {rep_idx}/{n_reps}"
+        else:
+            sl = slice(None)
+            p_x = result.P["time"]
+            rep_suffix = ""
+
         fig = make_subplots(
             rows=1, cols=2,
             subplot_titles=("Muscle weighting (M)", "Activation pattern (P)"),
@@ -847,17 +1216,97 @@ class AdvancedAnalysisWidget(QWidget):
             # matching activation line too (and vice versa via the group).
             fig.add_trace(
                 go.Scatter(
-                    x=result.P["time"], y=result.P[result.syn_names[s]],
+                    x=p_x, y=result.P[result.syn_names[s]].to_numpy()[sl],
                     mode="lines", name=result.syn_names[s],
                     line=dict(color=color, dash=dash),
                     legendgroup=group, showlegend=False,
                 ),
                 row=1, col=2,
             )
+        classified_note = " -- classified across participants" if result.classification == "k-means" else ""
+        default_p_xlabel = "sample (normalized cycle)" if rep_suffix else "sample (concatenated cycles)"
         self._apply_common_style(
-            fig, default_title=f"Muscle synergies — {trial_name} ({result.syns} synergies)",
+            fig,
+            default_title=f"Muscle synergies — {trial_name}{rep_suffix} ({result.syns} synergies){classified_note}",
+            xaxis_title=st["syn_weight_xlabel"] or None,
+            yaxis_title=st["syn_weight_ylabel"] or "Weighting (a.u.)",
+            xaxis2_title=st["syn_activation_xlabel"] or default_p_xlabel,
+            yaxis2_title=st["syn_activation_ylabel"] or "Activation (a.u.)",
         )
         self._chart_view.show_figure(fig, filename_stem=f"{trial_name}_synergy")
+
+    def _show_group_synergy_chart(self):
+        """Group-level consensus plot: mean muscle weighting + mean activation
+        pattern per classified synergy label, averaged across every
+        participant that contributed a (non-"combined") instance of it --
+        the "what does Syn1 look like across the whole cohort" view."""
+        n_points = self._syn_npoints_spin.value()
+        summary = group_synergy_summary(self._synergy_classified, n_points)
+        if not summary:
+            self._chart_view.show_placeholder(
+                "No consistently-classified synergies to summarize across participants."
+            )
+            self._refresh_series_swatches([])
+            return
+
+        labels = list(summary.keys())
+        st = self._chart_style
+        dash = None if st["line_dash"] == "solid" else st["line_dash"]
+        self._refresh_series_swatches(labels)
+
+        fig = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=("Mean muscle weighting (M) ± SD", "Mean activation pattern (P) ± SD"),
+        )
+        x = np.arange(n_points)
+        for i, label in enumerate(labels):
+            info = summary[label]
+            color = self._series_color(label, i)
+            group_id = f"grp{i}"
+
+            # Weighting: dot at the mean + error bar for SD, one point per
+            # muscle -- instead of a plain bar, so mean and spread across
+            # participants are both visible without stacking extra traces.
+            fig.add_trace(
+                go.Scatter(
+                    x=info["muscle_names"], y=info["mean_M"], mode="markers",
+                    marker=dict(color=color, size=9),
+                    error_y=dict(type="data", array=info["sd_M"], visible=True, color=color),
+                    name=f"{label} (n={info['n_trials']})",
+                    legendgroup=group_id, showlegend=True,
+                ),
+                row=1, col=1,
+            )
+
+            # Activation: mean line + shaded +/-SD band (upper/lower bound
+            # traces are invisible lines; the fill between them is the band).
+            upper, lower = info["mean_P"] + info["sd_P"], info["mean_P"] - info["sd_P"]
+            fig.add_trace(go.Scatter(
+                x=x, y=upper, mode="lines", line=dict(width=0),
+                legendgroup=group_id, showlegend=False, hoverinfo="skip",
+            ), row=1, col=2)
+            fig.add_trace(go.Scatter(
+                x=x, y=lower, mode="lines", line=dict(width=0),
+                fill="tonexty", fillcolor=self._hex_to_rgba(color, 0.25),
+                legendgroup=group_id, showlegend=False, hoverinfo="skip",
+            ), row=1, col=2)
+            fig.add_trace(go.Scatter(
+                x=x, y=info["mean_P"], mode="lines", name=label,
+                line=dict(color=color, dash=dash),
+                legendgroup=group_id, showlegend=False,
+            ), row=1, col=2)
+
+        total_trials = len(self._synergy_classified)
+        st = self._chart_style
+        self._apply_common_style(
+            fig,
+            default_title=f"Group synergy summary — {total_trials} participant(s), {len(labels)} synergies",
+            xaxis_title=st["syn_weight_xlabel"] or None,
+            yaxis_title=st["syn_weight_ylabel"] or "Weighting (a.u.)",
+            xaxis2_title=st["syn_activation_xlabel"] or "sample (normalized cycle)",
+            yaxis2_title=st["syn_activation_ylabel"] or "Activation (a.u.)",
+        )
+        self._chart_view.show_figure(fig, filename_stem="group_synergy_summary")
 
     # ── export ───────────────────────────────────────────────────────────
 
