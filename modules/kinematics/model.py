@@ -1,3 +1,9 @@
+# Nominal playback granularity (frames/sec) when a participant has EMG but no
+# usable kinematics clock. Arbitrary but reasonable: fine enough for smooth
+# scrubbing, far coarser than raw EMG sample rates (avoids a multi-kHz timer).
+_EMG_ONLY_PLAYBACK_FPS = 100.0
+
+
 class Model:
     """
     Model class for kinematics module.
@@ -18,15 +24,32 @@ class Model:
         )
         # Force plate data from analog channels (empty list if none in file)
         self.force_plates = getattr(data.kinematic, "force_plates", [])
+        # True once kinematic has real marker data with a usable frame clock.
+        # EMG-only participants (Kinematics Inspection's "no kinematics" flow)
+        # fall back to the EMG's own sample rate/duration as the master clock
+        # below, and the 3D pane shows its "no model" placeholder instead.
+        self.has_kinematics = bool(
+            self.kinematic.isValid() and getattr(self.kinematic, "point_fs", 0) > 0
+        )
 
     def kinematic_frame(self, frame):
         return self.kinematic[frame]
 
     def kinematic_frames(self):
-        return self.kinematic.length
+        if self.has_kinematics:
+            return self.kinematic.length
+        return max(1, int(round(self._emg_duration_s() * _EMG_ONLY_PLAYBACK_FPS)))
 
     def kinematic_frame_rate(self):
-        return self.kinematic.data.fs
+        if self.has_kinematics:
+            return self.kinematic.point_fs
+        return _EMG_ONLY_PLAYBACK_FPS
 
     def total_time(self):
-        return self.kinematic.length / self.kinematic.data.fs
+        if self.has_kinematics:
+            return self.kinematic.length / self.kinematic.point_fs
+        return self._emg_duration_s()
+
+    def _emg_duration_s(self):
+        tst = self.emg.emgTST
+        return tst.time if tst is not None else 0.0

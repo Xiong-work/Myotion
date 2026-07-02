@@ -22,6 +22,7 @@ from pathlib import Path
 from thefuzz import fuzz as _fuzz
 import webbrowser
 import argparse
+import numpy as np
 
 from PySide6.QtCore import Qt, Signal, Slot, QTranslator, QSignalBlocker, QThread
 from PySide6.QtGui import QIcon, QPalette, QFont
@@ -51,8 +52,11 @@ from qplotview import QPlotView
 # ///////////////////////////////////////////////////////////////
 from modules import *
 from widgets import *
-# _is_non_emg_channel is private and not re-exported by star imports; import explicitly
+# _is_non_emg_channel is private and not re-exported by star imports; import
+# explicitly. _is_sync_channel is defined further down in this file.
 from modules.pyMotion.core.emg import _is_non_emg_channel
+from modules.pyMotion.core.stitch import stitch_c3d, check_alignment, StitchError, load_emg_source
+from modules.kinematics.playplotview import PlayPlotWidget
 
 os.environ["QT_FONT_DPI"] = "96"  # FIX Problem for High DPI and Scale above 100%
 # SET AS GLOBAL WIDGETS
@@ -959,6 +963,266 @@ class EMGConfigEditDialog(QDialog):
         return self._accepted, self._cfg
 
 
+class StitchAlignmentDialog(QDialog):
+    """Preview and manually adjust the offset between a kinematics/force-plate
+    .c3d and a separately-recorded EMG file before merging them.
+
+    For the case core.stitch.check_alignment() can't trust automatically (e.g.
+    durations that don't line up, or a MAT file with no usable begin_time) —
+    stitchDataButtonClicked() sends the user here instead of guessing. Plots one
+    kinematics analog channel (force-plate Fz when available) against one EMG
+    channel on a shared, offset-adjustable timeline so misalignment is visible,
+    then writes the same combined .c3d the automatic path would via
+    core.stitch.stitch_c3d() once the user is satisfied.
+    """
+
+    def __init__(self, kin_file="", emg_file="", lock_emg=False, on_saved=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(self.tr("Align & Stitch"))
+        self.setMinimumSize(760, 560)
+        self.setSizeGripEnabled(True)
+
+        self._kin_file = kin_file
+        self._emg_file = emg_file
+        self._kin_labels = []      # kinematics analog channel labels
+        self._kin_arrays = {}      # label -> 1D array, native kin analog rate
+        self._kin_rate = 0.0
+        self._emg_source = None    # core.stitch.EmgSource
+        self._suggested_offset = 0.0
+        self._out_path = None
+        # Called with the stitched output path instead of showing the generic
+        # "now use Load EMG Data" message — e.g. Kinematics Inspection's "attach
+        # a kinematics file to this participant" flow uses this to update the
+        # existing participant in place rather than treating it as a new trial.
+        self._on_saved = on_saved
+
+        layout = QVBoxLayout(self)
+
+        kin_row = QHBoxLayout()
+        kin_btn = QPushButton(self.tr("Kinematics .c3d..."))
+        kin_btn.clicked.connect(self._pickKinFile)
+        self._kin_label = QLineEdit(kin_file)
+        self._kin_label.setReadOnly(True)
+        kin_row.addWidget(kin_btn)
+        kin_row.addWidget(self._kin_label, 1)
+        layout.addLayout(kin_row)
+
+        kin_chan_row = QHBoxLayout()
+        kin_chan_row.addWidget(QLabel(self.tr("Kinematics channel to preview:")))
+        self._kin_chan_combo = QComboBox()
+        self._kin_chan_combo.currentIndexChanged.connect(self._redraw)
+        kin_chan_row.addWidget(self._kin_chan_combo, 1)
+        layout.addLayout(kin_chan_row)
+
+        emg_row = QHBoxLayout()
+        emg_btn = QPushButton(self.tr("EMG file..."))
+        emg_btn.clicked.connect(self._pickEmgFile)
+        if lock_emg:
+            emg_btn.setEnabled(False)
+            emg_btn.setToolTip(self.tr("Fixed to this participant's existing EMG file"))
+        self._emg_label = QLineEdit(emg_file)
+        self._emg_label.setReadOnly(True)
+        emg_row.addWidget(emg_btn)
+        emg_row.addWidget(self._emg_label, 1)
+        layout.addLayout(emg_row)
+
+        chan_row = QHBoxLayout()
+        chan_row.addWidget(QLabel(self.tr("EMG channel to preview:")))
+        self._chan_combo = QComboBox()
+        self._chan_combo.currentIndexChanged.connect(self._redraw)
+        chan_row.addWidget(self._chan_combo, 1)
+        layout.addLayout(chan_row)
+
+        offset_row = QHBoxLayout()
+        offset_row.addWidget(QLabel(self.tr("Offset (s):")))
+        self._offset_spin = QDoubleSpinBox()
+        self._offset_spin.setRange(-3600.0, 3600.0)
+        self._offset_spin.setDecimals(4)
+        self._offset_spin.setSingleStep(0.01)
+        self._offset_spin.valueChanged.connect(self._redraw)
+        offset_row.addWidget(self._offset_spin)
+        self._suggest_btn = QPushButton(self.tr("Use Suggested"))
+        self._suggest_btn.clicked.connect(self._applySuggestedOffset)
+        offset_row.addWidget(self._suggest_btn)
+        offset_row.addStretch()
+        layout.addLayout(offset_row)
+
+        offset_desc = QLabel(self.tr(
+            "Offset is the kinematics-clock time at which the EMG recording's own "
+            "sample 0 occurred (kinematics time + offset = EMG time). 0 means both "
+            "recordings started together; a positive value means EMG started that "
+            "many seconds after the kinematics trigger."
+        ))
+        offset_desc.setWordWrap(True)
+        offset_desc.setStyleSheet("color: #888; font-size: 9pt;")
+        layout.addWidget(offset_desc)
+
+        self._status_label = QLabel("")
+        self._status_label.setWordWrap(True)
+        self._status_label.setStyleSheet("color: #888;")
+        layout.addWidget(self._status_label)
+
+        self._plot = PlayPlotWidget()
+        layout.addWidget(self._plot, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton(self.tr("Cancel"))
+        cancel_btn.clicked.connect(self.reject)
+        self._stitch_btn = QPushButton(self.tr("Save as Stitched C3D..."))
+        self._stitch_btn.setDefault(True)
+        self._stitch_btn.setEnabled(False)
+        self._stitch_btn.clicked.connect(self._onStitch)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(self._stitch_btn)
+        layout.addLayout(btn_row)
+
+        if self._kin_file:
+            self._loadKinFile()
+        if self._emg_file:
+            self._loadEmgFile()
+        self._maybeCheckAlignment()
+
+    def _pickKinFile(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, self.tr("Select kinematics / force-plate file"),
+            self._kin_file or "", "C3D Files (*.c3d)",
+        )
+        if f:
+            self._kin_file = f
+            self._kin_label.setText(f)
+            self._loadKinFile()
+            self._maybeCheckAlignment()
+
+    def _pickEmgFile(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, self.tr("Select EMG file"),
+            os.path.dirname(self._kin_file) if self._kin_file else "",
+            "EMG Files (*.c3d *.mat)",
+        )
+        if f:
+            self._emg_file = f
+            self._emg_label.setText(f)
+            self._loadEmgFile()
+            self._maybeCheckAlignment()
+
+    def _loadKinFile(self):
+        """Load every analog channel from the kinematics file and populate the
+        preview combo — the user picks which one to compare against EMG (a
+        force-plate Fz is the most useful for hardware-sync alignment, so it's
+        pre-selected when present, but any channel can be chosen)."""
+        try:
+            f = c3dFile(self._kin_file)
+            analog = f.analog
+            self._kin_labels = [l.strip() for l in analog.labels] if analog is not None else []
+            self._kin_rate = float(analog.fs) if analog is not None else 0.0
+            self._kin_arrays = (
+                {l: np.asarray(analog[l], dtype=np.float32) for l in self._kin_labels}
+                if analog is not None else {}
+            )
+        except Exception as e:
+            self._status_label.setText(self.tr("Could not load kinematics file: {}").format(str(e)))
+            self._kin_labels, self._kin_arrays, self._kin_rate = [], {}, 0.0
+
+        self._kin_chan_combo.blockSignals(True)
+        self._kin_chan_combo.clear()
+        self._kin_chan_combo.addItems(self._kin_labels)
+        default_idx = next(
+            (i for i, l in enumerate(self._kin_labels)
+             if l.lower() in ("force.fz1", "fz1", "force.fz", "fz")),
+            0,
+        )
+        if self._kin_labels:
+            self._kin_chan_combo.setCurrentIndex(default_idx)
+        self._kin_chan_combo.blockSignals(False)
+        self._redraw()
+
+    def _loadEmgFile(self):
+        try:
+            self._emg_source = load_emg_source(self._emg_file)
+        except Exception as e:
+            self._status_label.setText(self.tr("Could not load EMG file: {}").format(str(e)))
+            self._emg_source = None
+            self._redraw()
+            return
+
+        self._chan_combo.blockSignals(True)
+        self._chan_combo.clear()
+        self._chan_combo.addItems(self._emg_source.labels)
+        # Default to a sync/trigger-looking channel when one exists — it's the
+        # cleanest visual reference for alignment.
+        default_idx = next(
+            (i for i, l in enumerate(self._emg_source.labels) if _is_sync_channel(l)),
+            0,
+        )
+        self._chan_combo.setCurrentIndex(default_idx)
+        self._chan_combo.blockSignals(False)
+        self._redraw()
+
+    def _maybeCheckAlignment(self):
+        if not (self._kin_file and self._emg_file):
+            return
+        try:
+            offset_s, trusted, msg = check_alignment(self._kin_file, self._emg_file)
+        except StitchError as e:
+            offset_s, trusted, msg = 0.0, False, str(e)
+        self._suggested_offset = offset_s
+        self._offset_spin.blockSignals(True)
+        self._offset_spin.setValue(offset_s)
+        self._offset_spin.blockSignals(False)
+        self._status_label.setText(("Trusted: " if trusted else "Unconfirmed: ") + msg)
+        self._stitch_btn.setEnabled(True)
+        self._redraw()
+
+    def _applySuggestedOffset(self):
+        self._offset_spin.setValue(self._suggested_offset)
+
+    def _redraw(self):
+        self._plot.clear()
+        if self._kin_arrays and self._kin_chan_combo.count():
+            label = self._kin_chan_combo.currentText()
+            y = self._kin_arrays.get(label)
+            if y is not None and self._kin_rate > 0:
+                x = np.arange(len(y)) / self._kin_rate
+                self._plot.add_line(x, y, self.tr("Kinematics: {}").format(label), type="analog", rate=1)
+        if self._emg_source is not None and self._chan_combo.count():
+            chan = self._chan_combo.currentText()
+            y = self._emg_source.arrays[chan]
+            offset_s = self._offset_spin.value()
+            x = np.arange(len(y)) / self._emg_source.rate + offset_s
+            self._plot.add_line(x, y, self.tr("EMG: {}").format(chan), type="emg", rate=1)
+
+    def _onStitch(self):
+        offset_s = self._offset_spin.value()
+        try:
+            out_path = stitch_c3d(self._kin_file, self._emg_file, offset_s=offset_s)
+        except StitchError as e:
+            QMessageBox.critical(
+                self, self.tr("error"),
+                self.tr("Could not stitch these files:\n\n{}").format(str(e)),
+                QMessageBox.Ok,
+            )
+            return
+
+        self._out_path = out_path
+        if self._on_saved is not None:
+            self._on_saved(out_path)
+        else:
+            QMessageBox.information(
+                self, self.tr("Stitched"),
+                self.tr(
+                    "Wrote a combined kinematics + EMG file:\n\n{}\n\n"
+                    'Use "Load EMG Data" and select this file to add it as a participant.'
+                ).format(out_path),
+                QMessageBox.Ok,
+            )
+        self.accept()
+
+    def run(self):
+        self.exec()
+        return self._out_path
+
+
 class MainWindow(QMainWindow):
     # SIGNALS
     sigUpdateParticipants = Signal()
@@ -1028,6 +1292,35 @@ class MainWindow(QMainWindow):
         self._btn_clear_ws.clicked.connect(self.clearWorkspaceButtonClick)
         widgets.verticalLayout_11.insertWidget(0, self._btn_clear_ws)
 
+        # "Stitch Your Data" — merge a separately-recorded EMG file with a
+        # kinematics/force-plate .c3d into one combined .c3d, for hardware-synced
+        # trials that were saved to two files instead of one. Inserted above
+        # "Load EMG Data"; doesn't require an open workspace since it only writes
+        # a file to disk (loading the result still goes through the normal
+        # "Load EMG Data" flow, which does require one).
+        self._btn_stitch_data = QPushButton(self.tr("Stitch Your Data"))
+        self._btn_stitch_data.setMinimumHeight(56)
+        self._btn_stitch_data.setCursor(Qt.PointingHandCursor)
+        stitch_icon = QIcon()
+        stitch_icon.addFile(":/icons/images/icons/cil-link.png")
+        self._btn_stitch_data.setIcon(stitch_icon)
+        widgets.verticalLayout_35.insertWidget(0, self._btn_stitch_data)
+
+        # "Align & Stitch..." — manual-offset counterpart to "Stitch Your Data",
+        # for pairs stitchDataButtonClicked() declines to merge automatically
+        # (unmatched durations, missing/out-of-range MAT begin_time, etc).
+        # Inserted above the participant tree on the Kinematics Inspection page.
+        # kinematics_right's own QVBoxLayout was never kept as a named attribute
+        # by setupUi(), but layout() still returns it at runtime.
+        self._btn_align_stitch = QPushButton(self.tr("Align && Stitch..."))
+        self._btn_align_stitch.setMinimumHeight(36)
+        self._btn_align_stitch.setCursor(Qt.PointingHandCursor)
+        self._btn_align_stitch.setStyleSheet(
+            "color:#f4f4f4; background-color:#333b46; border-radius:6px; padding:4px 8px;"
+        )
+        self._btn_align_stitch.clicked.connect(self.alignStitchButtonClicked)
+        widgets.kinematics_right.layout().insertWidget(0, self._btn_align_stitch)
+
         # QTableWidget PARAMETERS
         # ///////////////////////////////////////////////////////////////
         widgets.tableWidget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -1085,6 +1378,7 @@ class MainWindow(QMainWindow):
         widgets.pushButton_4.clicked.connect(self.underDevelopmentClick)
 
         # EMG Page
+        self._btn_stitch_data.clicked.connect(self.stitchDataButtonClicked)
         widgets.pushButton_10.clicked.connect(self.addEMGButtonClick)
         widgets.pushButton_11.clicked.connect(self.singleEMGButtonClick)
         widgets.listWidget.itemDoubleClicked.connect(
@@ -1615,6 +1909,79 @@ class MainWindow(QMainWindow):
                 "" if enabled
                 else self.tr("Create or load a workspace first.")
             )
+
+    def stitchDataButtonClicked(self):
+        """Merge a separately-recorded EMG file with a kinematics/force-plate
+        .c3d into one combined .c3d, for hardware-synced trials that were saved
+        to two files instead of one. Writes a new file next to the kinematics
+        file; never modifies either source file. Does not require an open
+        workspace — loading the result still goes through "Load EMG Data".
+        """
+        kin_file, _ = QFileDialog.getOpenFileName(
+            self, self.tr("Select kinematics / force-plate file"),
+            self.home or "", "C3D Files (*.c3d)",
+        )
+        if not kin_file:
+            return
+
+        emg_file, _ = QFileDialog.getOpenFileName(
+            self, self.tr("Select EMG file to stitch in"),
+            os.path.dirname(kin_file), "EMG Files (*.c3d *.mat)",
+        )
+        if not emg_file:
+            return
+
+        if os.path.normcase(os.path.abspath(kin_file)) == os.path.normcase(os.path.abspath(emg_file)):
+            QMessageBox.warning(
+                self, self.tr("warning"),
+                self.tr("Please select two different files."),
+                QMessageBox.Ok,
+            )
+            return
+
+        try:
+            offset_s, trusted, msg = check_alignment(kin_file, emg_file)
+        except StitchError as e:
+            QMessageBox.critical(self, self.tr("error"), str(e), QMessageBox.Ok)
+            return
+
+        if not trusted:
+            QMessageBox.warning(
+                self, self.tr("Cannot auto-align"),
+                self.tr(
+                    "These files don't look like a hardware-synced pair:\n\n{}\n\n"
+                    "Stitching only proceeds automatically when the offset between "
+                    "the two recordings is trustworthy. Use \"Align & Stitch...\" on "
+                    "the Kinematics Inspection page to line them up manually instead."
+                ).format(msg),
+                QMessageBox.Ok,
+            )
+            return
+
+        try:
+            out_path = stitch_c3d(kin_file, emg_file, offset_s=offset_s)
+        except StitchError as e:
+            QMessageBox.critical(
+                self, self.tr("error"),
+                self.tr("Could not stitch these files:\n\n{}").format(str(e)),
+                QMessageBox.Ok,
+            )
+            return
+
+        QMessageBox.information(
+            self, self.tr("Stitched"),
+            self.tr(
+                "Wrote a combined kinematics + EMG file:\n\n{}\n\n{}\n\n"
+                'Use "Load EMG Data" and select this file to add it as a participant.'
+            ).format(out_path, msg),
+            QMessageBox.Ok,
+        )
+
+    def alignStitchButtonClicked(self):
+        """Open the manual alignment/stitch dialog for kinematics + EMG file
+        pairs that stitchDataButtonClicked() couldn't merge automatically."""
+        dlg = StitchAlignmentDialog(parent=self)
+        dlg.run()
 
     def addEMGButtonClick(self):
         if self.workspace is None:
@@ -3458,18 +3825,24 @@ class MainWindow(QMainWindow):
             person = self.workspace[p]
             emg = person.emg
             k = person.kinematic
-            if not k.isValid():
+            # k is None while this participant's async load hasn't finished yet
+            # (see workspace.emgAsyncLoader) — treat that the same as "not
+            # ready" rather than crashing the whole tree rebuild.
+            if k is None:
                 continue
-            # Markers group
-            marker_labels = k.reallabels
-            marker_group = QTreeWidgetItem(treeItem)
-            marker_group.setText(0, "Markers ({})".format(len(marker_labels)))
-            for point in marker_labels:
-                tr = QTreeWidgetItem(marker_group)
-                tr.setFlags(tr.flags() | Qt.ItemIsDragEnabled | Qt.ItemIsSelectable)
-                tr.setText(0, point)
-            marker_group.setExpanded(False)
-            treeItem.addChild(marker_group)
+            # Markers group — only participants with valid kinematics have
+            # markers, but EMG/force-plate/events/crop below don't depend on
+            # that, so an EMG-only participant still gets a browsable tree.
+            if k.isValid():
+                marker_labels = k.reallabels
+                marker_group = QTreeWidgetItem(treeItem)
+                marker_group.setText(0, "Markers ({})".format(len(marker_labels)))
+                for point in marker_labels:
+                    tr = QTreeWidgetItem(marker_group)
+                    tr.setFlags(tr.flags() | Qt.ItemIsDragEnabled | Qt.ItemIsSelectable)
+                    tr.setText(0, point)
+                marker_group.setExpanded(False)
+                treeItem.addChild(marker_group)
             # EMG group
             emg_channels = emg.getChannels()
             if emg_channels:
@@ -3513,9 +3886,17 @@ class MainWindow(QMainWindow):
                 crop_node.setText(0, "Crop: {:.3f} s → {:.3f} s".format(ci[0], ci[1]))
                 treeItem.addChild(crop_node)
 
+        # itemDoubleClicked isn't reset by tree.clear(), so reconnecting on every
+        # call (this runs on every tab visit / participant-list refresh) would
+        # stack up duplicate connections — each firing loadKinemtic once more,
+        # which is why the "no kinematics" prompt could pop up several times
+        # for a single double-click. Disconnect first so exactly one remains.
+        try:
+            tree.itemDoubleClicked.disconnect(self.loadKinemtic)
+        except (TypeError, RuntimeError):
+            pass  # nothing was connected yet
         tree.itemDoubleClicked.connect(self.loadKinemtic)
         tree.setHeaderItem(QTreeWidgetItem(["Participant(s)"]))
-        tree.addTopLevelItem(treeItem)
 
     def _setup_kinematics_splitters(self):
         """Replace the fixed HBox/VBox layouts in the kinematics page with QSplitters.
@@ -3934,15 +4315,41 @@ class MainWindow(QMainWindow):
 
         p_name = item.text(column)
         p = self.workspace.findParticipant(p_name)
+        profile = self.workspace[p]
 
-        if not self.workspace[p].kinematic.isValid():
-            QMessageBox.critical(
-                None,
-                self.tr("error"),
-                self.tr("No kinematic data available!"),
+        if profile.kinematic is None:
+            # Still async-loading (see workspace.emgAsyncLoader) — offering to
+            # attach a kinematics file here would race with the loader thread
+            # about to set profile.kinematic itself.
+            QMessageBox.information(
+                self, self.tr("Still loading"),
+                self.tr("'{}' is still loading. Try again in a moment.").format(p_name),
                 QMessageBox.Ok,
             )
             return
+
+        if not profile.kinematic.isValid():
+            reply = QMessageBox.question(
+                self, self.tr("No kinematics data"),
+                self.tr(
+                    "'{}' has EMG data but no kinematics/force-plate data.\n\n"
+                    "Attach a kinematics file to this participant now?"
+                ).format(p_name),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self._attachKinematicsToParticipant(profile, p_name)
+                return
+            # No — fall through and open an EMG-only Signals/playback view
+            # below instead of a dead end; Model/Controller both understand
+            # a participant with no usable kinematics clock (see Model.has_kinematics).
+
+        # Tear down the previously active controller first — each load builds
+        # a new one against the same shared widgets, and without this the old
+        # timer and signal connections (tree double-click, playbar, ...) keep
+        # firing alongside whatever loads next (see Controller.stop()).
+        if getattr(self, "_active_controller", None) is not None:
+            self._active_controller.stop()
 
         self.model = Model(self.workspace[p])
         top = widgets.graph_top
@@ -3952,7 +4359,7 @@ class MainWindow(QMainWindow):
             txt = item.child(i).text(0)
             if txt.startswith("Events") or txt.startswith("Crop:"):
                 item.removeChild(item.child(i))
-        Controller(
+        self._active_controller = Controller(
             self.model,
             widgets.renderWidget,
             widgets.playSlider,
@@ -3963,6 +4370,33 @@ class MainWindow(QMainWindow):
             save_callback=lambda: self.saveProjectButtonClick(show=False),
             export_events_callback=lambda: self._exportParticipantEvents(p),
         )
+
+    def _attachKinematicsToParticipant(self, profile, p_name):
+        """Open the Align & Stitch dialog to attach a kinematics/force-plate
+        file to a participant that currently only has EMG data. The EMG side
+        is fixed to this participant's already-loaded EMG file — only the
+        kinematics file is picked. On success the participant is updated in
+        place (kept as one entry, with its existing EMG channel/muscle
+        mapping intact) rather than creating a new, duplicate participant.
+        """
+        def _on_saved(out_path):
+            profile.kinematic_file = out_path
+            profile.kinematic = kinematic(out_path)
+            self.saveProjectButtonClick(show=False)
+            QMessageBox.information(
+                self, self.tr("Attached"),
+                self.tr(
+                    "Kinematics data attached to '{}'.\n\n"
+                    "Double-click the participant again to view it."
+                ).format(p_name),
+                QMessageBox.Ok,
+            )
+            self.preloadKinematicPage()
+
+        dlg = StitchAlignmentDialog(
+            emg_file=profile.emg.emgFile, lock_emg=True, on_saved=_on_saved, parent=self,
+        )
+        dlg.run()
 
     def preloadFreqAnalysisPage(self):
         if self.workspace == None:

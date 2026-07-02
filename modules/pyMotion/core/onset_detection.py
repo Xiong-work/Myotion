@@ -18,7 +18,7 @@ def detect_emg_onsets(
     fs,
     threshold_std=3.0,
     window_above_s=0.050,
-    window_below_s=0.010,
+    window_below_s=0.100,
     baseline_duration_s=0.5,
     crop_start_s=None,
 ):
@@ -35,7 +35,13 @@ def detect_emg_onsets(
     window_above_s : float
         Minimum duration above threshold to confirm an onset (default 50 ms).
     window_below_s : float
-        Minimum gap below threshold needed to end an active segment (default 10 ms).
+        Minimum gap below threshold needed to end an active segment (default
+        100 ms). Below-threshold dips shorter than this are bridged rather
+        than ending the segment — real envelopes ripple during a sustained
+        contraction, and 10-50 ms was too tight to survive that (measured on
+        a real jump trial: a single ~2s leg-muscle burst fragmented into 22
+        onset/offset pairs at 10 ms, still 22 at 50 ms — every real gap was
+        55 ms or longer — and collapsed to the expected handful at 100 ms).
     baseline_duration_s : float
         Duration used for the fallback baseline window (default 0.5 s).
     crop_start_s : float or None
