@@ -49,6 +49,7 @@ from widgets.customframe import CustomFrame
 
 from .resources_rc import *
 from modules.stats import StatsWidget
+from modules.advanced_emg import AdvancedAnalysisWidget
 from qplotview import *
 
 
@@ -3624,6 +3625,11 @@ class Ui_MainWindow(object):
         self.stats_page.setObjectName("stats_page")
 
         self.stackedWidget.addWidget(self.stats_page)
+
+        self.advanced_page = AdvancedAnalysisWidget()
+        self.advanced_page.setObjectName("advanced_page")
+
+        self.stackedWidget.addWidget(self.advanced_page)
 
         self.home = QWidget()
         self.home.setObjectName("home")

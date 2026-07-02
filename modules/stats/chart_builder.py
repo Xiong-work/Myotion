@@ -186,7 +186,7 @@ def empty_html(message: str = "") -> str:
         "background-size:cover,200px 200px;"
     ) if _WATERMARK_B64 else "background:#282a36;"
     return (
-        "<!DOCTYPE html><html><body style='"
+        "<!DOCTYPE html><html style='height:100%'><body style='"
         f"{watermark}color:#6272a4;font-family:sans-serif;"
         "display:flex;align-items:center;justify-content:center;height:100%;margin:0'>"
         f"<p style='font-size:14px;position:relative'>{message}</p></body></html>"

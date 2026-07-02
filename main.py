@@ -1847,6 +1847,12 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet(UIFunctions.selectMenu(btn.styleSheet()))  # SELECT MENU
             self.preloadFreqAnalysisPage()
 
+        # SHOW ADVANCED EMG ANALYSIS PAGE
+        if btnName == "btn_advanced":
+            widgets.stackedWidget.setCurrentWidget(widgets.advanced_page)  # SET PAGE
+            UIFunctions.resetStyle(self, btnName)
+            btn.setStyleSheet(UIFunctions.selectMenu(btn.styleSheet()))  # SELECT MENU
+
         if btnName == "btn_save":
             logger.info("Save BTN clicked!")
 

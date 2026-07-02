@@ -16,8 +16,9 @@ from multimethod import multimethod
 6. Normalization
 7. Regularity/Entropy:  pattern matching, check complexity of waveform
 8. on/off detection:    threhold detection
-9. co-contraction index:  integration ratio between two waveform
+9. co-contraction index: Falconer & Winter (1985) / Rudolph et al. (2000)
 10. zero-crossing:   count zero values
+11. time normalization: resample a cycle to 0-100% for cross-trial comparison
 
 
 all returned vector remain same dimension
@@ -309,9 +310,44 @@ class timeSeriesTable:
     def kurtosis(self):
         return [self.kurtosis(key) for key in self.labels]
 
-    # co-contraction
-    def cocontraction(self, key1, key2):
-        return np.trapz(self.data[key1]) / np.trapz(self.data[key2])
+    # co-contraction index (CCI), time-varying curve.
+    # Expects both channels to be same-length, non-negative (rectified/
+    # enveloped) EMG. For CCI values to fall in the literature's documented
+    # ranges and to be comparable across muscles/participants, the envelope
+    # should also be amplitude-normalized (e.g. MVC- or trial-max-normalized,
+    # so peak = 1) -- the formulas below still compute on a non-normalized
+    # envelope, just with a scale-dependent (not 0-1 bounded) result.
+    # method:
+    #   "rudolph"        -> CCI(t) = (L(t)/H(t)) * (L(t)+H(t))   [Rudolph et al., 2000]
+    #   "falconer_winter" -> CCI(t) = 2*L(t) / (L(t)+H(t))        [Falconer & Winter, 1985]
+    # where L(t)/H(t) are the lower/higher of the two signals at each time point.
+    def cocontractionCurve(self, key1, key2, method="rudolph"):
+        a = np.asarray(self.data[key1], dtype=float)
+        b = np.asarray(self.data[key2], dtype=float)
+        if len(a) != len(b):
+            raise ValueError("both channels must have the same number of samples")
+        if np.any(a < 0) or np.any(b < 0):
+            raise ValueError(
+                f"cocontraction expects non-negative (rectified/enveloped) EMG; "
+                f"'{key1}' or '{key2}' contains negative values -- rectify and "
+                "envelope the signal before computing CCI"
+            )
+
+        lower = np.minimum(a, b)
+        higher = np.maximum(a, b)
+
+        if method == "falconer_winter":
+            total = lower + higher
+            return np.divide(2 * lower, total, out=np.zeros_like(total), where=total != 0)
+        elif method == "rudolph":
+            ratio = np.divide(lower, higher, out=np.zeros_like(higher), where=higher != 0)
+            return ratio * (lower + higher)
+        else:
+            raise ValueError(f"unknown CCI method: {method}")
+
+    # co-contraction index, single scalar (mean of the time-varying curve)
+    def cocontraction(self, key1, key2, method="rudolph"):
+        return float(np.mean(self.cocontractionCurve(key1, key2, method)))
 
     def entropy(self, key):
         return
@@ -363,6 +399,35 @@ class timeSeriesTable:
             activated.append([seg[0], len(self.data[key])])
 
         return activated
+
+    # =================================== #
+    #      time normalization (0-100%)    #
+    # =================================== #
+    # resample one cycle [t_start, t_end) seconds to n_points evenly spaced
+    # across 0-100% of the cycle (e.g. heel-strike to heel-strike). Used to
+    # make cycles of different durations comparable (synergy analysis, SPM,
+    # waveform averaging).
+    def timeNormalizeCycle(self, key, t_start, t_end, n_points=101):
+        if t_end <= t_start:
+            raise ValueError("t_end must be greater than t_start")
+
+        i_start = int(round(t_start * self.fs))
+        i_end = int(round(t_end * self.fs))
+        if i_start < 0 or i_end > self.n or i_end - i_start < 2:
+            raise ValueError("cycle bounds out of range or too short to resample")
+
+        segment = np.asarray(self.data[key][i_start:i_end], dtype=float)
+        x_old = np.linspace(0, 100, len(segment))
+        x_new = np.linspace(0, 100, n_points)
+        return np.interp(x_new, x_old, segment)
+
+    # resample multiple cycles to the same number of points.
+    # cycles: sequence of (t_start, t_end) tuples, in seconds
+    # returns: ndarray of shape (n_cycles, n_points)
+    def timeNormalizeCycles(self, key, cycles, n_points=101):
+        return np.array(
+            [self.timeNormalizeCycle(key, t0, t1, n_points) for t0, t1 in cycles]
+        )
 
     # digital butterWorth filter
     def __butterWorth(self, N, Wn, btype):
