@@ -11,7 +11,6 @@ Two entry points feed the same BatchDataset:
     unless an explicit per-participant cycle list is supplied.
 """
 
-import re
 from pathlib import Path
 
 import numpy as np
@@ -19,55 +18,7 @@ import pandas as pd
 
 from .batch_dataset import BatchTrial, BatchDataset
 from .timeSeriesTable import timeSeriesTable
-
-# Matches the CycleStart_<Task>[ #n] / CycleEnd_<Task>[ #n] TrialEvent labels
-# that Controller._run_cycle_detection (kinematics workflow) writes into
-# profile.extra_events -- see modules/kinematics/controller.py.
-_CYCLE_EVENT_RE = re.compile(r'^Cycle(Start|End)_(.+?)(?:\s+#(\d+))?$')
-
-
-def _cycles_from_events(events, task_type=None):
-    """Reconstruct per-task (t_start, t_end) cycle lists from Cycle* TrialEvents.
-
-    events: iterable of TrialEvent (context == "Cycle" pairs are used, all
-        others ignored).
-    task_type: which task's cycles to return when a trial has more than one
-        (rare -- normally a participant is only ever run through one task's
-        detector at a time). None returns the only task present, or raises if
-        more than one is present and ambiguous.
-
-    Returns a list of (t_start_s, t_end_s), sorted by rep number, or [] if no
-    matching Cycle* events exist.
-    """
-    by_task = {}
-    for ev in events:
-        if getattr(ev, "context", None) != "Cycle":
-            continue
-        m = _CYCLE_EVENT_RE.match(ev.label)
-        if not m:
-            continue
-        kind, task, num_txt = m.group(1), m.group(2), m.group(3)
-        num = int(num_txt) if num_txt else 1
-        by_task.setdefault(task, {}).setdefault(num, {})[kind] = ev.time_s
-
-    result = {}
-    for task, reps in by_task.items():
-        pairs = [
-            (reps[num]["Start"], reps[num]["End"])
-            for num in sorted(reps)
-            if "Start" in reps[num] and "End" in reps[num]
-        ]
-        if pairs:
-            result[task] = pairs
-
-    if task_type is not None:
-        return result.get(task_type, [])
-    if len(result) > 1:
-        raise ValueError(
-            "multiple task types have detected cycles ({}); pass "
-            "task_type= to disambiguate".format(", ".join(sorted(result)))
-        )
-    return next(iter(result.values()), [])
+from .cycle_detection import _cycles_from_events
 
 
 def load_external_folder(

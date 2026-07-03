@@ -1,5 +1,5 @@
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QVBoxLayout, QInputDialog, QMenu, QMessageBox, QTreeWidgetItem
+from PySide6.QtWidgets import QVBoxLayout, QInputDialog, QMenu, QMessageBox, QTreeWidgetItem, QDialog
 import numpy as np
 import scipy.signal as _sig
 
@@ -7,11 +7,13 @@ from modules.kinematics.model import Model
 from modules.kinematics.playbarwidget import PlayBarWidget
 from modules.kinematics.playplotview import PlayPlotWidget
 from modules.kinematics.renderwidget import RenderWidget
+from modules.kinematics.manual_cycles_dialog import ManualCyclesDialog
 from modules.pyMotion.core.trial import TrialEvent
 from modules.pyMotion.core.onset_detection import detect_emg_onsets
 from modules.pyMotion.core.cycle_detection import (
     detect_gait_cycles, detect_sit_stand_cycles, detect_squat_cycles,
     detect_trunk_flexion_cycles, detect_lifting_cycles, detect_pointing_cycles,
+    _cycles_from_events,
 )
 
 # Task type (playbar combo text) -> detector dispatch. Each takes
@@ -78,6 +80,7 @@ class Controller:
         self.playbar.exportEventsRequested.connect(self._onExportEvents)
         self.playbar.onsetDetectionToggled.connect(self._onOnsetDetectionToggled)
         self.playbar.cycleDetectionToggled.connect(self._onCycleDetectionToggled)
+        self.playbar.manualCyclesRequested.connect(self._onManualCyclesRequested)
 
         # Cache the last-selected EMG channel so the onset button can act without re-click
         self._current_emg_channel = None
@@ -140,6 +143,7 @@ class Controller:
             (self.playbar.exportEventsRequested, self._onExportEvents),
             (self.playbar.onsetDetectionToggled, self._onOnsetDetectionToggled),
             (self.playbar.cycleDetectionToggled, self._onCycleDetectionToggled),
+            (self.playbar.manualCyclesRequested, self._onManualCyclesRequested),
             (self.labeltree.itemDoubleClicked, self.tree_item_select),
             (self.labeltree.customContextMenuRequested, self._on_tree_context_menu),
         ):
@@ -386,7 +390,18 @@ class Controller:
         except Exception:
             pairs = []
 
-        # Remove this task's previous detection events before adding new ones
+        self._apply_cycle_pairs(task_type, pairs)
+
+    def _apply_cycle_pairs(self, task_type, pairs):
+        """Replace task_type's CycleStart_/CycleEnd_ events with *pairs*.
+
+        Shared by auto-detection (_run_cycle_detection) and manual cycle
+        entry (_onManualCyclesRequested) -- both just need to produce a
+        list[(t_start_s, t_end_s)] and hand it here. pairs=[] clears the
+        task's events without adding new ones (used by both "detection
+        found nothing" and "user cleared all rows in the manual dialog").
+        """
+        # Remove this task's previous events before adding new ones
         start_prefix = "CycleStart_" + task_type
         end_prefix = "CycleEnd_" + task_type
         stale = [e for e in self.model.extra_events
@@ -395,6 +410,7 @@ class Controller:
             self.model.extra_events.remove(e)
             if e in self.model.events:
                 self.model.events.remove(e)
+                self.top.remove_event(e)
 
         if not pairs:
             self._refresh_event_tree()
@@ -461,6 +477,35 @@ class Controller:
         task_type = self.playbar.current_task_type()
         self._current_cycle_task = task_type
         self._run_cycle_detection(task_type, marker_name)
+
+    def _onManualCyclesRequested(self):
+        """Open the manual cycle-entry dialog for the selected task type.
+
+        Available regardless of has_kinematics -- unlike auto-detection,
+        typing in boundaries by hand needs no marker/force-plate data, so
+        this is the only way to define reps for an EMG-only participant.
+        Pre-fills from that task's existing Cycle* events (if any), so it
+        also works as a fine-tune-by-typed-numbers tool after auto-detect.
+        """
+        task_type = self.playbar.current_task_type()
+        existing = _cycles_from_events(self.model.extra_events, task_type)
+        dlg = ManualCyclesDialog(
+            task_type, existing, self.model.total_time(), parent=self.labeltree
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        pairs, errors = dlg.get_pairs()
+        if errors:
+            QMessageBox.warning(
+                None,
+                self.labeltree.tr("Manual Cycles"),
+                self.labeltree.tr("Some rows were invalid and skipped:\n{}")
+                .format("\n".join(errors)),
+            )
+
+        self._current_cycle_task = task_type
+        self._apply_cycle_pairs(task_type, pairs)
 
     def _onExportEvents(self):
         if self._export_events_callback:

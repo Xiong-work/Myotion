@@ -225,6 +225,7 @@ class PlayBarWidget(QWidget):
     exportEventsRequested = Signal()
     onsetDetectionToggled = Signal(bool)
     cycleDetectionToggled = Signal(bool)
+    manualCyclesRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -340,6 +341,16 @@ class PlayBarWidget(QWidget):
             lambda checked: self.cycleDetectionToggled.emit(checked)
         )
 
+        # Manual cycle entry — always enabled, unlike Detect Cycles which
+        # needs kinematics + a marker. Covers EMG-only trials where the user
+        # has external notes for the rep boundaries and no marker to detect from.
+        self.manualCyclesButton = QPushButton(self.tr("Manual Cycles…"))
+        self.manualCyclesButton.setStyleSheet(buttonStyle)
+        self.manualCyclesButton.setToolTip(
+            self.tr("Type in repetition boundaries by hand (works without kinematics)")
+        )
+        self.manualCyclesButton.clicked.connect(self.manualCyclesRequested)
+
         hbox.addWidget(self.prevFrameButton)
         hbox.addWidget(self.playbutton)
         hbox.addWidget(self.nextFrameButton)
@@ -353,6 +364,7 @@ class PlayBarWidget(QWidget):
         hbox.addWidget(self.taskTypeCombo)
         hbox.addWidget(self.sourceMarkerCombo)
         hbox.addWidget(self.detectCyclesButton)
+        hbox.addWidget(self.manualCyclesButton)
 
         vbox.addWidget(self.slider)
         vbox.addWidget(ctrl)

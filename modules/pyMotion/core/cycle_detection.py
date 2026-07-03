@@ -21,10 +21,67 @@ distinct entry per task while sharing implementation where the underlying
 signal shape is the same. See detect_trunk_flexion_cycles' docstring for a
 noted simplification (single-marker vertical burst, not a true 2-marker
 trunk angle).
+
+Also holds _cycles_from_events(), which parses the CycleStart_/CycleEnd_
+TrialEvent pairs these detectors produce back out of a trial's event list --
+used both by Controller (to pre-fill the manual-cycle-entry dialog) and by
+batch_io.from_workspace() (to feed Advanced EMG).
 """
+
+import re
 
 import numpy as np
 import scipy.signal as _sig
+
+# Matches the CycleStart_<Task>[ #n] / CycleEnd_<Task>[ #n] TrialEvent labels
+# that Controller._apply_cycle_pairs (kinematics workflow, auto-detect or
+# manual entry) writes into profile.extra_events -- see
+# modules/kinematics/controller.py.
+_CYCLE_EVENT_RE = re.compile(r'^Cycle(Start|End)_(.+?)(?:\s+#(\d+))?$')
+
+
+def _cycles_from_events(events, task_type=None):
+    """Reconstruct per-task (t_start, t_end) cycle lists from Cycle* TrialEvents.
+
+    events: iterable of TrialEvent (context == "Cycle" pairs are used, all
+        others ignored).
+    task_type: which task's cycles to return when a trial has more than one
+        (rare -- normally a participant is only ever run through one task's
+        detector at a time). None returns the only task present, or raises if
+        more than one is present and ambiguous.
+
+    Returns a list of (t_start_s, t_end_s), sorted by rep number, or [] if no
+    matching Cycle* events exist.
+    """
+    by_task = {}
+    for ev in events:
+        if getattr(ev, "context", None) != "Cycle":
+            continue
+        m = _CYCLE_EVENT_RE.match(ev.label)
+        if not m:
+            continue
+        kind, task, num_txt = m.group(1), m.group(2), m.group(3)
+        num = int(num_txt) if num_txt else 1
+        by_task.setdefault(task, {}).setdefault(num, {})[kind] = ev.time_s
+
+    result = {}
+    for task, reps in by_task.items():
+        pairs = [
+            (reps[num]["Start"], reps[num]["End"])
+            for num in sorted(reps)
+            if "Start" in reps[num] and "End" in reps[num]
+        ]
+        if pairs:
+            result[task] = pairs
+
+    if task_type is not None:
+        return result.get(task_type, [])
+    if len(result) > 1:
+        raise ValueError(
+            "multiple task types have detected cycles ({}); pass "
+            "task_type= to disambiguate".format(", ".join(sorted(result)))
+        )
+    return next(iter(result.values()), [])
 
 
 def _quietest_window_std(arr, win):

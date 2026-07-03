@@ -24,7 +24,7 @@ import webbrowser
 import argparse
 import numpy as np
 
-from PySide6.QtCore import Qt, Signal, Slot, QTranslator, QSignalBlocker, QThread
+from PySide6.QtCore import Qt, Signal, Slot, QTranslator, QSignalBlocker, QThread, QSize
 from PySide6.QtGui import QIcon, QPalette, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -41,6 +41,8 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QHBoxLayout,
+    QToolButton,
+    QStyle,
 )
 from PySide6.QtWebEngineCore import QWebEngineUrlScheme
 
@@ -1463,6 +1465,10 @@ class MainWindow(QMainWindow):
         self.workspace = None
         self.home = None
         self.account = None
+        # Clear Designer's placeholder table content and disable the
+        # data-dependent controls (Signal Process / Select All) until a
+        # workspace with participants is loaded.
+        self.updateEMGParticipantBox()
 
         self.participant_filter = ""
         self.filesystemTree = (
@@ -1532,11 +1538,33 @@ class MainWindow(QMainWindow):
             "}"
             "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
         )
-        self._crop_group = QGroupBox("Analysis Segment")
+        self._crop_group = QGroupBox("")
         self._crop_group.setStyleSheet(_GRP_S)
         _cg_layout = QVBoxLayout(self._crop_group)
-        _cg_layout.setContentsMargins(8, 16, 8, 4)
+        _cg_layout.setContentsMargins(8, 8, 8, 4)
         _cg_layout.setSpacing(3)
+        _crop_header = QHBoxLayout()
+        _crop_header.setSpacing(4)
+        _crop_title_lbl = QLabel("Analysis Segment")
+        _crop_title_lbl.setStyleSheet("font-weight: bold; color: #c8c8c8; border: none;")
+        _crop_header.addWidget(_crop_title_lbl)
+        _crop_help_btn = QToolButton()
+        _crop_help_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarContextHelpButton)
+        )
+        _crop_help_btn.setIconSize(QSize(14, 14))
+        _crop_help_btn.setStyleSheet("QToolButton { border: none; background: transparent; }")
+        _crop_help_btn.setToolTip(
+            self.tr(
+                "Sets the valid time window for this participant's EMG analysis. "
+                "Original signal is unchanged; Clear reverts to the full trial.\n\n"
+                "Single-participant use only — for batch processing, segment via "
+                "the Kinematics Inspection module instead."
+            )
+        )
+        _crop_header.addWidget(_crop_help_btn)
+        _crop_header.addStretch()
+        _cg_layout.addLayout(_crop_header)
         _crop_row = QHBoxLayout()
         _crop_row.setSpacing(4)
         _lbl_start = QLabel("Start (s):")
@@ -3332,11 +3360,23 @@ class MainWindow(QMainWindow):
 
     # UPDATE UI EVENTS/Slots
     # //////////////////////////////////////////////////////////////
+    def _updateEMGDataControlsEnabled(self):
+        """Enable Signal Process / Select All only once a workspace has participants.
+
+        Also guards EMGParticipantSelectAllClicked, which calls
+        self.workspace.getFilteredParticipants() unconditionally -- without
+        this, toggling Select All with no workspace loaded would crash.
+        """
+        has_data = self.workspace is not None and len(self.workspace.getParticipants()) > 0
+        widgets.pushButton_11.setEnabled(has_data)
+        widgets.checkBox_2.setEnabled(has_data)
+
     @Slot()
     def updateEMGParticipantBox(self):
         if self.workspace is None:
             widgets.tableWidget_2.clearContents()
             widgets.tableWidget_2.setRowCount(0)
+            self._updateEMGDataControlsEnabled()
             return
         participants = self.workspace.getFilteredParticipants(self.participant_filter)
         n = len(participants)
@@ -3371,6 +3411,7 @@ class MainWindow(QMainWindow):
 
         # Sync listWidget_3 state.
         self.syncListWidgetWithSelectedParticipants()
+        self._updateEMGDataControlsEnabled()
 
     def updateWorkSpaceParticipantBox(self):
         # listwidget_3
