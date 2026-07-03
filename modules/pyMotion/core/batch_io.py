@@ -11,6 +11,7 @@ Two entry points feed the same BatchDataset:
     unless an explicit per-participant cycle list is supplied.
 """
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,55 @@ import pandas as pd
 
 from .batch_dataset import BatchTrial, BatchDataset
 from .timeSeriesTable import timeSeriesTable
+
+# Matches the CycleStart_<Task>[ #n] / CycleEnd_<Task>[ #n] TrialEvent labels
+# that Controller._run_cycle_detection (kinematics workflow) writes into
+# profile.extra_events -- see modules/kinematics/controller.py.
+_CYCLE_EVENT_RE = re.compile(r'^Cycle(Start|End)_(.+?)(?:\s+#(\d+))?$')
+
+
+def _cycles_from_events(events, task_type=None):
+    """Reconstruct per-task (t_start, t_end) cycle lists from Cycle* TrialEvents.
+
+    events: iterable of TrialEvent (context == "Cycle" pairs are used, all
+        others ignored).
+    task_type: which task's cycles to return when a trial has more than one
+        (rare -- normally a participant is only ever run through one task's
+        detector at a time). None returns the only task present, or raises if
+        more than one is present and ambiguous.
+
+    Returns a list of (t_start_s, t_end_s), sorted by rep number, or [] if no
+    matching Cycle* events exist.
+    """
+    by_task = {}
+    for ev in events:
+        if getattr(ev, "context", None) != "Cycle":
+            continue
+        m = _CYCLE_EVENT_RE.match(ev.label)
+        if not m:
+            continue
+        kind, task, num_txt = m.group(1), m.group(2), m.group(3)
+        num = int(num_txt) if num_txt else 1
+        by_task.setdefault(task, {}).setdefault(num, {})[kind] = ev.time_s
+
+    result = {}
+    for task, reps in by_task.items():
+        pairs = [
+            (reps[num]["Start"], reps[num]["End"])
+            for num in sorted(reps)
+            if "Start" in reps[num] and "End" in reps[num]
+        ]
+        if pairs:
+            result[task] = pairs
+
+    if task_type is not None:
+        return result.get(task_type, [])
+    if len(result) > 1:
+        raise ValueError(
+            "multiple task types have detected cycles ({}); pass "
+            "task_type= to disambiguate".format(", ".join(sorted(result)))
+        )
+    return next(iter(result.values()), [])
 
 
 def load_external_folder(
@@ -84,14 +134,19 @@ def load_external_folder(
     return dataset
 
 
-def from_workspace(ws, participants, cycles_by_name=None):
+def from_workspace(ws, participants, cycles_by_name=None, task_type=None):
     """Build a BatchDataset from participants already loaded in a Myotion workspace.
 
-    cycles_by_name: optional {participant_name: [(t0, t1), ...]} override.
-    When omitted, each participant's own crop_interval is used as a single
-    whole-trial cycle. Deriving multiple discrete-rep cycles automatically
-    from kinematics/user events is not implemented yet -- pass
-    cycles_by_name explicitly for that case.
+    cycles_by_name: optional {participant_name: [(t0, t1), ...]} override,
+        checked first for each participant.
+    task_type: which task's detected cycles to use when a participant has
+        Cycle* events for more than one task (see kinematics workflow's
+        Detect Cycles button); passed through to _cycles_from_events().
+
+    Per participant, in order: cycles_by_name override, then CycleStart_/
+    CycleEnd_ events written by the kinematics workflow's task-type cycle
+    detector (modules/kinematics/controller.py), then crop_interval as a
+    single whole-trial cycle.
     """
     dataset = BatchDataset(cycle_mode="discrete")
     for person in participants:
@@ -107,13 +162,16 @@ def from_workspace(ws, participants, cycles_by_name=None):
 
         if cycles_by_name is not None and person.name in cycles_by_name:
             cycles = list(cycles_by_name[person.name])
-        elif profile.crop_interval is not None:
-            cycles = [tuple(profile.crop_interval)]
         else:
-            raise ValueError(
-                f"participant '{person.name}' has no crop_interval and no "
-                "explicit cycles provided -- cannot define a cycle boundary"
-            )
+            cycles = _cycles_from_events(getattr(profile, "extra_events", []), task_type)
+            if not cycles and profile.crop_interval is not None:
+                cycles = [tuple(profile.crop_interval)]
+            if not cycles:
+                raise ValueError(
+                    f"participant '{person.name}' has no crop_interval, no "
+                    "detected cycles, and no explicit cycles provided -- "
+                    "cannot define a cycle boundary"
+                )
 
         dataset.add(BatchTrial(person.name, sub_tst, cycles))
 

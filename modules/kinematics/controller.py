@@ -9,6 +9,25 @@ from modules.kinematics.playplotview import PlayPlotWidget
 from modules.kinematics.renderwidget import RenderWidget
 from modules.pyMotion.core.trial import TrialEvent
 from modules.pyMotion.core.onset_detection import detect_emg_onsets
+from modules.pyMotion.core.cycle_detection import (
+    detect_gait_cycles, detect_sit_stand_cycles, detect_squat_cycles,
+    detect_trunk_flexion_cycles, detect_lifting_cycles, detect_pointing_cycles,
+)
+
+# Task type (playbar combo text) -> detector dispatch. Each takes
+# (marker_z, marker_xyz, fs, fp_vertical, fp_fs) and returns
+# list[(t_start_s, t_end_s)]. marker_z (single vertical axis) drives the
+# gait/vertical-burst family; marker_xyz (full 3D trajectory) drives the
+# reach family (lifting/pointing) since those motions aren't purely vertical.
+_CYCLE_DETECTORS = {
+    "Gait":                     lambda z, xyz, fs, fp, fp_fs: detect_gait_cycles(z, fs, fp_vertical=fp, fp_fs=fp_fs, mode="walk"),
+    "Running":                  lambda z, xyz, fs, fp, fp_fs: detect_gait_cycles(z, fs, fp_vertical=fp, fp_fs=fp_fs, mode="run"),
+    "Sit-to-Stand":             lambda z, xyz, fs, fp, fp_fs: detect_sit_stand_cycles(z, fs),
+    "Squat":                    lambda z, xyz, fs, fp, fp_fs: detect_squat_cycles(z, fs),
+    "Trunk Flexion/Extension":  lambda z, xyz, fs, fp, fp_fs: detect_trunk_flexion_cycles(z, fs),
+    "Lifting":                  lambda z, xyz, fs, fp, fp_fs: detect_lifting_cycles(xyz, fs),
+    "Pointing":                 lambda z, xyz, fs, fp, fp_fs: detect_pointing_cycles(xyz, fs),
+}
 
 
 class Controller:
@@ -58,11 +77,18 @@ class Controller:
         self.playbar.eventMarkRequested.connect(self._onMarkEvent)
         self.playbar.exportEventsRequested.connect(self._onExportEvents)
         self.playbar.onsetDetectionToggled.connect(self._onOnsetDetectionToggled)
+        self.playbar.cycleDetectionToggled.connect(self._onCycleDetectionToggled)
 
         # Cache the last-selected EMG channel so the onset button can act without re-click
         self._current_emg_channel = None
         self._current_emg_arr = None
         self._current_emg_fs = None
+        # Task type last run through cycle detection — needed to know which
+        # CycleStart_/CycleEnd_ events to remove when the button is unchecked.
+        self._current_cycle_task = None
+        self.playbar.set_marker_options(
+            self.model.kinematic.reallabels if self.model.has_kinematics else []
+        )
         self.step = 1
         self.labeltree.itemDoubleClicked.connect(self.tree_item_select)
 
@@ -113,6 +139,7 @@ class Controller:
             (self.playbar.eventMarkRequested, self._onMarkEvent),
             (self.playbar.exportEventsRequested, self._onExportEvents),
             (self.playbar.onsetDetectionToggled, self._onOnsetDetectionToggled),
+            (self.playbar.cycleDetectionToggled, self._onCycleDetectionToggled),
             (self.labeltree.itemDoubleClicked, self.tree_item_select),
             (self.labeltree.customContextMenuRequested, self._on_tree_context_menu),
         ):
@@ -336,6 +363,104 @@ class Controller:
             self._current_emg_arr,
             self._current_emg_fs,
         )
+
+    def _run_cycle_detection(self, task_type, marker_name):
+        """Run task-type cycle detection for *marker_name*, update events and tree."""
+        detector = _CYCLE_DETECTORS.get(task_type)
+        if detector is None or not self.model.has_kinematics:
+            return
+        if marker_name not in self.model.kinematic.data.data:
+            return
+
+        marker_pts = self.model.kinematic.data[marker_name]
+        marker_z = [p.xyz[2] for p in marker_pts]
+        marker_xyz = [p.xyz for p in marker_pts]
+        fs = self.model.kinematic.point_fs
+        fp_vertical, fp_fs = None, None
+        if self.model.force_plates:
+            plate = self.model.force_plates[0]
+            fp_vertical, fp_fs = plate.Fz, plate.fs
+
+        try:
+            pairs = detector(marker_z, marker_xyz, fs, fp_vertical, fp_fs)
+        except Exception:
+            pairs = []
+
+        # Remove this task's previous detection events before adding new ones
+        start_prefix = "CycleStart_" + task_type
+        end_prefix = "CycleEnd_" + task_type
+        stale = [e for e in self.model.extra_events
+                 if e.label.startswith(start_prefix) or e.label.startswith(end_prefix)]
+        for e in stale:
+            self.model.extra_events.remove(e)
+            if e in self.model.events:
+                self.model.events.remove(e)
+
+        if not pairs:
+            self._refresh_event_tree()
+            if stale and self._save_callback:
+                self._save_callback()
+            return
+
+        multi = len(pairs) > 1
+        for i, (t_start, t_end) in enumerate(pairs):
+            suffix = " #{}".format(i + 1) if multi else ""
+            start_ev = TrialEvent(t_start, "CycleStart_{}{}".format(task_type, suffix), "Cycle")
+            end_ev = TrialEvent(t_end, "CycleEnd_{}{}".format(task_type, suffix), "Cycle")
+            self.model.extra_events.append(start_ev)
+            self.model.extra_events.append(end_ev)
+            self.model.events.append(start_ev)
+            self.model.events.append(end_ev)
+            self.top.add_event(start_ev)
+            self.top.add_event(end_ev)
+        self.model.events.sort(key=lambda e: e.time_s)
+
+        self._refresh_event_tree()
+        if self._save_callback:
+            self._save_callback()
+
+    def _onCycleDetectionToggled(self, checked):
+        if not checked:
+            # Turning off — remove the detection events for the last-run task
+            if self._current_cycle_task is not None:
+                start_prefix = "CycleStart_" + self._current_cycle_task
+                end_prefix = "CycleEnd_" + self._current_cycle_task
+                stale = [e for e in self.model.extra_events
+                         if e.label.startswith(start_prefix) or e.label.startswith(end_prefix)]
+                for e in stale:
+                    self.model.extra_events.remove(e)
+                    if e in self.model.events:
+                        self.model.events.remove(e)
+                        self.top.remove_event(e)
+                if stale:
+                    self._refresh_event_tree()
+                    if self._save_callback:
+                        self._save_callback()
+            return
+
+        # Turning on — validate then run
+        if not self.model.has_kinematics:
+            QMessageBox.warning(
+                None,
+                self.labeltree.tr("Cycle Detection"),
+                self.labeltree.tr("This participant has no kinematics/marker data."),
+            )
+            self.playbar.detectCyclesButton.setChecked(False)
+            return
+
+        marker_name = self.playbar.current_source_marker()
+        if not marker_name:
+            QMessageBox.warning(
+                None,
+                self.labeltree.tr("Cycle Detection"),
+                self.labeltree.tr("Select a kinematics source marker first."),
+            )
+            self.playbar.detectCyclesButton.setChecked(False)
+            return
+
+        task_type = self.playbar.current_task_type()
+        self._current_cycle_task = task_type
+        self._run_cycle_detection(task_type, marker_name)
 
     def _onExportEvents(self):
         if self._export_events_callback:

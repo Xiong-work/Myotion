@@ -2945,6 +2945,35 @@ class MainWindow(QMainWindow):
                 logger.info("batch process: cancelled due to mixed sampling rates")
                 return
 
+        # Same config applies to every enabled channel identically (it is not
+        # channel-specific), so participants with different enabled-channel
+        # sets form a different cohort — warn before applying one config
+        # across a mixed cohort.
+        chan_map = {}
+        for p in listofpeople:
+            try:
+                enabled = frozenset(self.workspace[p].emg.enabledChannels)
+                chan_map.setdefault(enabled, []).append(p.name)
+            except Exception as e:
+                logger.error("batch process: failed to read channels for {}: {}".format(p.name, str(e)))
+
+        if len(chan_map) > 1:
+            lines = []
+            for chans, plist in chan_map.items():
+                chan_str = ", ".join(sorted(chans)) if chans else "(none)"
+                lines.append("[{}]: {}".format(chan_str, ", ".join(plist)))
+            reply = QMessageBox.warning(
+                None,
+                self.tr("warning"),
+                self.tr(
+                    "Selected participants have different enabled EMG channels:\n{}\n\nContinue batch processing?"
+                ).format("\n".join(lines)),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                logger.info("batch process: cancelled due to mismatched channel sets")
+                return
+
         # Confirm batch start — show config name, pipeline steps, participant list.
         # (EMGConfigWindow used the old Ui_EMGConfigWindow which is incompatible
         # with the new pipeline config structure, so we bypass it entirely.)
