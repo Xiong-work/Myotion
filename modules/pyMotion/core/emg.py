@@ -443,7 +443,10 @@ class emgConfigure:
 
 
 class emg:
-    def __init__(self, file=""):
+    # preparsed_c3d: optional already-loaded c3dFile for *file* -- lets a
+    # caller that also needs a kinematic() from the same combined C3D (e.g.
+    # batch_scan.build_participant()) parse it once instead of twice.
+    def __init__(self, file="", preparsed_c3d=None):
         self.emgFile = file  # file path
         self.emgTST = None  # emg data
         self.rawTST = None  # original loaded signal, never modified after setEMGFile
@@ -459,7 +462,7 @@ class emg:
         self.channel_filter = "(emg|EMG)+"
 
         if file != None and len(file):
-            self.setEMGFile(file)
+            self._setEMGFile(file, c3d_obj=preparsed_c3d)
 
     async def async_load(self):
         """Asynchronously load EMG and MVC files."""
@@ -598,6 +601,9 @@ class emg:
 
     # set EMG file path
     def setEMGFile(self, f):
+        self._setEMGFile(f)
+
+    def _setEMGFile(self, f, c3d_obj=None):
         if f is None or len(str(f).strip()) == 0:
             raise ValueError("EMG file path is empty")
         if not os.path.isfile(f):
@@ -608,7 +614,8 @@ class emg:
         # load file
         try:
             if self.isC3D(f):
-                c3d_obj = c3dFile(f)
+                if c3d_obj is None:
+                    c3d_obj = c3dFile(f)
                 all_labels = c3d_obj.analog.labels
 
                 # Auto-exclude known non-EMG channels (force plates, IMU sensors)

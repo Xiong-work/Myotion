@@ -152,6 +152,33 @@ class AnalogData:
         return timeSeriesTable(self.fs, self.labels, data)
 
 
+def c3d_probe(file):
+    """Read only a C3D file's point/analog header info -- no per-frame data --
+    for fast role classification ("does it have real marker data? what are
+    its analog channel labels?"). c3dFile's constructor is correct but always
+    pays for a full frame-by-frame parse (self.reader.read_frames()), which is
+    unnecessary and can take several seconds per file when only the header is
+    needed (e.g. batch_stitch.py classifying dozens of files before offering
+    to stitch, or batch_scan.py validating a candidate's channel list).
+
+    Returns (has_points: bool, analog_labels: list[str]), using the exact
+    same has_points rule as c3dFile (point_used > 0, has labels, positive
+    point_rate).
+    """
+    try:
+        with open(file, "rb") as fh:
+            reader = c3d.Reader(fh)
+            point_used = reader.point_used
+            point_rate = reader.point_rate
+            point_labels = [s.strip() for s in reader.point_labels]
+            analog_labels = [s.strip() for s in reader.analog_labels]
+    except Exception as e:
+        raise ValueError("Failed to open C3D file {}: {}".format(file, str(e)))
+
+    has_points = point_used > 0 and len(point_labels) > 0 and point_rate > 0
+    return has_points, analog_labels
+
+
 class c3dFile:
     def __init__(self, file):
         self.file = file

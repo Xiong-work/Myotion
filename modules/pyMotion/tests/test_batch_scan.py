@@ -1,7 +1,7 @@
 """
 Headless regression check for batch_scan.py (batch-import folder resolution).
 
-Builds a synthetic folder tree in a tempdir and monkeypatches c3dFile/matFile
+Builds a synthetic folder tree in a tempdir and monkeypatches c3d_probe/matFile
 so no real C3D/MAT fixture files are needed -- runs standalone:
     cd modules/pyMotion/tests && python test_batch_scan.py
 """
@@ -22,29 +22,25 @@ def check(label, cond):
     assert cond, label
 
 
-# ---- fake c3dFile/matFile so parsing doesn't need real binary fixtures -----
-class _FakeAnalog:
-    def __init__(self, labels):
-        self.labels = labels
+# ---- fake c3d_probe/matFile so parsing doesn't need real binary fixtures ---
+# _validate_emg_data_file() reads C3D channel labels via c3d_probe() (header-
+# only, no per-frame data) rather than the full c3dFile parse -- fake that
+# instead of c3dFile itself.
+_C3D_LABELS_BY_NAME = {
+    "task1.c3d": ["EMG1", "EMG2", "Fx1", "Fy1", "Fz1"],   # normal cohort member
+    "P02_task1.c3d": ["EMG1", "EMG2", "Fx1", "Fy1", "Fz1"],
+    "P03_task1.c3d": ["EMG1", "EMG3"],                     # different channel set
+    "task1_forceplate_only.c3d": ["Fx1", "Fy1", "Fz1"],    # no EMG channels
+    "task1_unparseable.c3d": None,                          # raises on "open"
+}
 
 
-class FakeC3D:
-    # Per-filename label sets, keyed by basename -- lets the same fake class
-    # return different channel sets for different files in one test run.
-    _by_name = {
-        "task1.c3d": ["EMG1", "EMG2", "Fx1", "Fy1", "Fz1"],   # normal cohort member
-        "P02_task1.c3d": ["EMG1", "EMG2", "Fx1", "Fy1", "Fz1"],
-        "P03_task1.c3d": ["EMG1", "EMG3"],                     # different channel set
-        "task1_forceplate_only.c3d": ["Fx1", "Fy1", "Fz1"],    # no EMG channels
-        "task1_unparseable.c3d": None,                          # raises on "open"
-    }
-
-    def __init__(self, path):
-        name = os.path.basename(path)
-        labels = self._by_name.get(name, ["EMG1", "EMG2"])
-        if labels is None:
-            raise ValueError("corrupt file")
-        self.analog = _FakeAnalog(labels)
+def _fake_c3d_probe(path):
+    name = os.path.basename(path)
+    labels = _C3D_LABELS_BY_NAME.get(name, ["EMG1", "EMG2"])
+    if labels is None:
+        raise ValueError("corrupt file")
+    return True, labels
 
 
 class FakeMat:
@@ -54,11 +50,11 @@ class FakeMat:
 
 # Keep references to the real implementations -- restored later for the
 # build_participant() section, which needs a real parsed fixture.
-_real_c3dFile = batch_scan.c3dFile
+_real_c3d_probe = batch_scan.c3d_probe
 _real_matFile = batch_scan.matFile
 _real_is_non_emg_channel = batch_scan._is_non_emg_channel
 
-batch_scan.c3dFile = FakeC3D
+batch_scan.c3d_probe = _fake_c3d_probe
 batch_scan.matFile = FakeMat
 
 # _is_non_emg_channel is imported by name into batch_scan's namespace;
@@ -146,11 +142,11 @@ with tempfile.TemporaryDirectory() as root:
 
 
 # ---- build_participant(): real fixture, real emg/kinematic/person classes --
-# Undo the c3dFile/matFile monkeypatch for this section -- we want the real
+# Undo the c3d_probe/matFile monkeypatch for this section -- we want the real
 # parser against a real sample file here, not the fakes above.
 import core.batch_scan as _bs
 from core.batch_scan import ParticipantCandidate, build_participant, reassign_mvc_file
-_bs.c3dFile = _real_c3dFile
+_bs.c3d_probe = _real_c3d_probe
 _bs.matFile = _real_matFile
 _bs._is_non_emg_channel = _real_is_non_emg_channel
 

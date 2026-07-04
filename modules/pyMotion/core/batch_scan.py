@@ -17,11 +17,13 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .c3d import c3dFile
+from .c3d import c3dFile, c3d_probe
 from .mat import matFile
 from .emg import emg, _is_non_emg_channel
 from .kinematic import kinematic
 from .person import person
+from .muscle_guess import _is_sync_channel
+from .batch_stitch import _pairing_key
 
 
 @dataclass
@@ -45,6 +47,12 @@ def _validate_emg_data_file(file_path):
     its own plain-English status reporting, so refactoring them into one
     function would mean routing translated UI text through a non-QObject
     context for no real benefit -- not worth the risk to the working wizard.
+
+    C3D labels come from c3d_probe() (header-only, no per-frame data) --
+    validation only needs the channel list, and scanning a whole batch root
+    calls this once per candidate, so paying for a full frame-by-frame parse
+    here would make "detect folder" / "scan" noticeably slow for real
+    multi-MB motion-capture files.
     """
     path = Path(file_path)
     if not path.is_file():
@@ -56,8 +64,7 @@ def _validate_emg_data_file(file_path):
 
     try:
         if ext == ".c3d":
-            parsed = c3dFile(str(path))
-            labels = parsed.analog.labels
+            _, labels = c3d_probe(str(path))
         else:
             parsed = matFile(str(path))
             labels = parsed.labels
@@ -68,7 +75,7 @@ def _validate_emg_data_file(file_path):
         return False, "No channels found in file: {}".format(path.name), []
 
     if ext == ".c3d":
-        emg_labels = [l for l in labels if not _is_non_emg_channel(l)]
+        emg_labels = [l for l in labels if not _is_non_emg_channel(l) and not _is_sync_channel(l)]
         if not emg_labels:
             return False, (
                 "No EMG channels found in '{}'. All {} analog channel(s) "
@@ -76,7 +83,17 @@ def _validate_emg_data_file(file_path):
             ), []
         return True, "", emg_labels
 
-    return True, "", list(labels)
+    # .mat exports can carry a sync/trigger channel alongside real EMG too
+    # (e.g. Noraxon's "...同步" line) -- exclude it here the same way the
+    # single-add wizard does right after loading (main.py's
+    # importEMGBtnClicked), so it never becomes part of the channel-mapping
+    # table or the cohort channel-signature comparison.
+    mat_labels = [l for l in labels if not _is_sync_channel(l)]
+    if not mat_labels:
+        return False, "No EMG channels found in '{}' (only sync/trigger channel(s)).".format(
+            path.name
+        ), []
+    return True, "", mat_labels
 
 
 def scan_batch_folder(root, layout):
@@ -145,7 +162,13 @@ def build_participant(candidate, mapping):
     """
     enabled, muscle, mvc_file = mapping
 
-    e = emg(candidate.emg_file)
+    # A combined C3D is parsed once here and shared between emg()/kinematic()
+    # -- each would otherwise independently re-parse the identical file from
+    # disk (a full frame-by-frame read that can take several seconds), doubling
+    # the cost of loading every participant for no benefit.
+    preparsed = c3dFile(candidate.emg_file) if candidate.emg_file.lower().endswith(".c3d") else None
+
+    e = emg(candidate.emg_file, preparsed_c3d=preparsed)
 
     mvc_by_basename = {os.path.basename(f): f for f in candidate.mvc_files}
     for chan, mvc_basename in mvc_file.items():
@@ -161,7 +184,7 @@ def build_participant(candidate, mapping):
             e.renameChannel(chan, new_name)
 
     p = person(candidate.name, "N/A", "N/A")
-    kin = kinematic(candidate.emg_file)
+    kin = kinematic(candidate.emg_file, preparsed_c3d=preparsed)
     return p, e, kin
 
 
@@ -251,6 +274,22 @@ class LayoutSuggestion:
     participant_count: int = 0
 
 
+def _superseded_by_stitch(f: Path, root_path: Path) -> bool:
+    """True if *f* is a raw (pre-stitch) source file that already has a
+    "<stem>_stitched.c3d" sibling next to it -- i.e. Batch Stitch already
+    merged it, and it's no longer the file a task-file glob should point at.
+
+    Uses the same pairing key find_stitch_pairs() groups by (stem, with a
+    trailing "_EMG"/"-EMG" marker stripped) -- otherwise the EMG side of a
+    two-c3d pair (e.g. "task_EMG.c3d", stitched output named after the
+    kinematics file's own stem "task_stitched.c3d") would never match its
+    own stem and would keep getting proposed as a stale separate candidate.
+    """
+    if f.stem.lower().endswith("_stitched"):
+        return False
+    return (root_path / f.parent / (_pairing_key(f.stem) + "_stitched.c3d")).is_file()
+
+
 def detect_layout(root, exts=_DATA_EXTS):
     """Inspect a real batch-root folder tree and propose a BatchLayout.
 
@@ -275,6 +314,13 @@ def detect_layout(root, exts=_DATA_EXTS):
         for fn in filenames:
             if os.path.splitext(fn)[1].lower() in exts:
                 files.append(Path(dirpath, fn).relative_to(root_path))
+
+    # Drop raw pre-stitch kinematics/EMG source files that have already been
+    # merged into a "<stem>_stitched.c3d" sibling (same skip rule
+    # find_stitch_pairs() applies) -- otherwise e.g. "lift.c3d", "lift.mat"
+    # and "lift_stitched.c3d" all get proposed as three separate "task file"
+    # candidates for what is really just one task.
+    files = [f for f in files if not _superseded_by_stitch(f, root_path)]
 
     if not files:
         return LayoutSuggestion(warnings=[
