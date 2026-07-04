@@ -149,7 +149,7 @@ with tempfile.TemporaryDirectory() as root:
 # Undo the c3dFile/matFile monkeypatch for this section -- we want the real
 # parser against a real sample file here, not the fakes above.
 import core.batch_scan as _bs
-from core.batch_scan import ParticipantCandidate, build_participant
+from core.batch_scan import ParticipantCandidate, build_participant, reassign_mvc_file
 _bs.c3dFile = _real_c3dFile
 _bs.matFile = _real_matFile
 _bs._is_non_emg_channel = _real_is_non_emg_channel
@@ -186,5 +186,26 @@ else:
           e.emgMVCTST.hasChannel("TA-R") and len(e.emgMVCTST["TA-R"]) > 0)
     check("rawTST preserves the full original signal, unaffected by enable/disable",
           e.rawTST is not None and e.rawTST.hasChannel("TA-R"))
+
+    # ---- reassign_mvc_file(): post-rename MVC (re)assignment for Edit Mapping
+    check("PER-R has no MVC data yet (never assigned in the original mapping)",
+          not e.emgMVCTST.hasChannel("PER-R") or len(e.emgMVCTST["PER-R"]) == 0)
+    reassign_mvc_file(e, "PER-R", raw_per_r, fixture)
+    check("reassign_mvc_file assigns MVC data under the current (renamed) name",
+          e.emgMVCTST.hasChannel("PER-R") and len(e.emgMVCTST["PER-R"]) > 0)
+    check("reassign_mvc_file records the file under the current name in mvcFilesMap",
+          e.mvcFilesMap.get("PER-R") == fixture)
+
+    try:
+        reassign_mvc_file(e, "TA-R", "no such raw label", fixture)
+        check("reassign_mvc_file raises on a raw label absent from the MVC file", False)
+    except ValueError:
+        check("reassign_mvc_file raises on a raw label absent from the MVC file", True)
+
+    try:
+        reassign_mvc_file(e, "NOT-A-CHANNEL", raw_per_r, fixture)
+        check("reassign_mvc_file raises on an unknown current channel", False)
+    except ValueError:
+        check("reassign_mvc_file raises on an unknown current channel", True)
 
 print("\nAll batch_scan checks passed.")

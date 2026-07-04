@@ -1,0 +1,45 @@
+[batch]
+task_type = "Trunk Flexion/Extension"
+participant_glob = "*/*"
+emg_file = "Tasks/task_bending.mat"
+mvc_glob = "MVCs/*.mat"
+
+[channel_mapping]
+enabled = ["Noraxon Ultium-右 BICEPS FEM.", "Noraxon Ultium-右 EXT.OBLIQUE", "Noraxon Ultium-右 GLUT. MED.", "Noraxon Ultium-右 LAT. GASTRO", "Noraxon Ultium-右 LUMBAR ES", "Noraxon Ultium-右 MULTIFIDII", "Noraxon Ultium-右 RECT.ABDOM.LO.", "Noraxon Ultium-右 RECTUS FEM.", "Noraxon Ultium-右 TENSOR FL.", "Noraxon Ultium-右 TIB.ANT."]
+
+[channel_mapping.muscle]
+"Noraxon Ultium-右 BICEPS FEM." = "BICEPS FEM."
+"Noraxon Ultium-右 EXT.OBLIQUE" = "EXT.OBLIQUE"
+"Noraxon Ultium-右 GLUT. MED." = "GLUT. MED."
+"Noraxon Ultium-右 LAT. GASTRO" = "LAT. GASTRO"
+"Noraxon Ultium-右 LUMBAR ES" = "LUMBAR ES"
+"Noraxon Ultium-右 MULTIFIDII" = "MULTIFIDII"
+"Noraxon Ultium-右 RECT.ABDOM.LO." = "RECT.ABDOM.LO."
+"Noraxon Ultium-右 RECTUS FEM." = "RECTUS FEM."
+"Noraxon Ultium-右 TENSOR FL." = "TENSOR FL."
+"Noraxon Ultium-右 TIB.ANT." = "TIB.ANT."
+
+[channel_mapping.mvc_file]
+"Noraxon Ultium-右 LUMBAR ES" = "beiji.mat"
+"Noraxon Ultium-右 MULTIFIDII" = "beiji.mat"
+"Noraxon Ultium-右 GLUT. MED." = "tzj+kjmzj.mat"
+"Noraxon Ultium-右 BICEPS FEM." = "guer.mat"
+"Noraxon Ultium-右 LAT. GASTRO" = "fcj.mat"
+"Noraxon Ultium-右 RECT.ABDOM.LO." = "fuji.mat"
+"Noraxon Ultium-右 EXT.OBLIQUE" = "fuji.mat"
+"Noraxon Ultium-右 TENSOR FL." = "tzj+kjmzj.mat"
+"Noraxon Ultium-右 RECTUS FEM." = "gzj.mat"
+"Noraxon Ultium-右 TIB.ANT." = "jqj.mat"
+
+[emg_processing]
+dc_offset_enable = true
+bandpass_enable = true
+bandpass_cutoff_l = 50
+bandpass_cutoff_h = 450
+bandpass_order = 2
+rectify_enable = true
+envelope_enable = true
+envelope_cutoff = 6
+envelope_order = 2
+normalization_enable = true
+normalization_type = "mvc"

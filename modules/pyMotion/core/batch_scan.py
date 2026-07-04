@@ -12,6 +12,8 @@ not require a per-participant click the way the single-add wizard's
 """
 
 import os
+import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -163,6 +165,51 @@ def build_participant(candidate, mapping):
     return p, e, kin
 
 
+def reassign_mvc_file(e, current_channel, raw_channel, mvc_path):
+    """(Re)assign MVC data to an already-renamed channel -- for editing an
+    already-loaded participant's mapping (main.py's Edit Mapping action),
+    where emg.setMVCFile() can no longer be used directly.
+
+    setMVCFile() requires its `channel` argument to simultaneously (a) be a
+    current emg.Channels entry and (b) be a label found in the MVC file's
+    own raw analog channels -- true only before a channel has been renamed.
+    Once renamed (the normal state for anything loaded through Batch
+    Import), no single string satisfies both, so this replicates
+    setMVCFile()'s core logic directly against emgMVCTST/mvcFilesMap, keyed
+    by the channel's CURRENT name. raw_channel is the original device
+    channel name the MVC file's own labels are expected to use -- reusing
+    the same convention build_participant() relies on (a cohort shares one
+    recording setup, so MVC files use the same raw channel names as the
+    task file did before it was renamed).
+
+    Raises ValueError on any mismatch (channel/file missing, raw label not
+    present in this particular MVC file) -- callers should catch this and
+    skip/report per participant rather than let one bad pairing abort a
+    whole batch edit.
+    """
+    if current_channel not in e.Channels:
+        raise ValueError("Channel {} does not exist".format(current_channel))
+    if mvc_path is None or not os.path.isfile(mvc_path):
+        raise ValueError("MVC file not found: {}".format(mvc_path))
+
+    if e.isC3D(mvc_path):
+        mvc_obj = c3dFile(mvc_path)
+        mvc_labels = mvc_obj.analog.labels
+        mvc_tst = mvc_obj.analog.convertToTST()
+    elif e.isMAT(mvc_path):
+        mvc_obj = matFile(mvc_path)
+        mvc_labels = mvc_obj.labels
+        mvc_tst = mvc_obj.convertToTST()
+    else:
+        raise ValueError("Unsupported MVC file format: {}".format(mvc_path))
+
+    if raw_channel not in mvc_labels:
+        raise ValueError("Channel {} not found in MVC file {}".format(raw_channel, mvc_path))
+
+    e.emgMVCTST[current_channel] = mvc_tst[raw_channel]
+    e.mvcFilesMap[current_channel] = mvc_path
+
+
 def channel_signature_groups(candidates):
     """Group "ready" candidates by their channel set, for the same cohort-
     consistency warning EMGBatchProcessButtonClicked already applies to
@@ -177,3 +224,191 @@ def channel_signature_groups(candidates):
         sig = frozenset(c.channels)
         groups.setdefault(sig, []).append(c.name)
     return groups
+
+
+# ---------------------------------------------------------------------------
+# Layout detection -- propose a BatchLayout by inspecting a real folder tree,
+# instead of asking the user to hand-write glob patterns from scratch.
+# ---------------------------------------------------------------------------
+
+_DATA_EXTS = (".c3d", ".mat")
+_MVC_BUCKET_RE = re.compile(r'mvc|maximum.?voluntary', re.IGNORECASE)
+
+
+@dataclass
+class TaskCandidate:
+    glob: str    # relative glob for BatchLayout.emg_file, e.g. "Tasks/task_lift.mat" or "*.c3d"
+    coverage: int  # number of detected participant folders this pattern matches a file in
+    example: str   # one matched relative path, for display
+
+
+@dataclass
+class LayoutSuggestion:
+    participant_glob: str = "*"
+    mvc_glob: str = ""
+    task_candidates: list = field(default_factory=list)  # list[TaskCandidate], best first
+    warnings: list = field(default_factory=list)
+    participant_count: int = 0
+
+
+def detect_layout(root, exts=_DATA_EXTS):
+    """Inspect a real batch-root folder tree and propose a BatchLayout.
+
+    Heuristic, not authoritative -- meant to pre-fill BatchConfigDialog for
+    the user to review/edit, never applied unconfirmed. Purely structural
+    (not name-based), scanning shallow-to-deep and stopping at the first
+    depth whose child folder names form a small, reused vocabulary (e.g.
+    every participant sharing the same {"Tasks", "MVCs"} pair, or no further
+    nesting at all). A depth is rejected -- and a deeper one tried -- when
+    its "child names" look more like unique per-participant IDs than a
+    small set of reused category folders (e.g. depth 1 of
+    Group/Participant/Tasks trees, where each group's children are a
+    different participant-ID vocabulary). A bucket name matching
+    _MVC_BUCKET_RE becomes mvc_glob; every other bucket's files become
+    task_candidates for the user to pick exactly one from (batches are
+    single-task by convention -- see module docstring).
+    """
+    root_path = Path(root)
+    files = []
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for fn in filenames:
+            if os.path.splitext(fn)[1].lower() in exts:
+                files.append(Path(dirpath, fn).relative_to(root_path))
+
+    if not files:
+        return LayoutSuggestion(warnings=[
+            "No {} files found under this folder.".format(" / ".join(exts))
+        ])
+
+    max_depth = max(len(f.parts) - 1 for f in files)
+    best = None  # (vocab_ratio, -depth, depth, groups) -- lowest ratio wins
+    chosen = None
+    for d in range(1, max_depth + 1):
+        nested = [f for f in files if len(f.parts) > d]
+        groups = {}
+        for f in nested:
+            groups.setdefault(f.parts[:d], []).append(f)
+        if len(groups) < 2:
+            continue
+
+        n_groups = len(groups)
+        bucket_names = {
+            f.parts[d] for group_files in groups.values() for f in group_files
+            if len(f.parts) > d + 1
+        }
+        vocab_ratio = len(bucket_names) / n_groups
+
+        candidate = (vocab_ratio, -d, d, groups)
+        if best is None or candidate < best:
+            best = candidate
+        if len(bucket_names) <= max(3, n_groups / 2):
+            # A small, reused set of child folder names (or none at all) --
+            # this looks like the real participant level; stop here rather
+            # than descending into what would just be per-participant
+            # bucket subfolders.
+            chosen = (d, groups)
+            break
+
+    if chosen is not None:
+        d, groups = chosen
+    elif best is not None:
+        _, _, d, groups = best
+    else:
+        # Every depth had fewer than 2 groups (e.g. a single participant) --
+        # fall back to "each file's own parent folder is the participant".
+        d = 1
+        groups = {}
+        for f in files:
+            groups.setdefault(f.parts[:1], []).append(f)
+
+    participant_glob = "/".join(["*"] * d)
+    n = len(groups)
+
+    mvc_files, task_files = [], []
+    for group_files in groups.values():
+        for f in group_files:
+            bucket = f.parts[d] if len(f.parts) > d + 1 else None
+            if bucket and _MVC_BUCKET_RE.search(bucket):
+                mvc_files.append((bucket, f))
+            else:
+                task_files.append((bucket, f))
+
+    mvc_glob = ""
+    if mvc_files:
+        bucket = Counter(b for b, _ in mvc_files).most_common(1)[0][0]
+        ext_set = {f.suffix.lower() for b, f in mvc_files if b == bucket}
+        ext = next(iter(ext_set)) if len(ext_set) == 1 else ""
+        mvc_glob = "{}/*{}".format(bucket, ext)
+
+    task_candidates = _propose_task_patterns(task_files, n)
+
+    warnings = []
+    covered = sum(len(v) for v in groups.values())
+    if covered < len(files):
+        warnings.append(
+            "{} file(s) outside the detected participant structure were ignored "
+            "(e.g. loose files at the batch root).".format(len(files) - covered)
+        )
+    if not task_candidates:
+        warnings.append("Could not confidently guess a task file pattern -- set it manually.")
+    elif task_candidates[0].coverage < n:
+        warnings.append(
+            "Best task-file guess only matches {}/{} participant folders -- "
+            "review before use.".format(task_candidates[0].coverage, n)
+        )
+
+    return LayoutSuggestion(
+        participant_glob=participant_glob,
+        mvc_glob=mvc_glob,
+        task_candidates=task_candidates,
+        warnings=warnings,
+        participant_count=n,
+    )
+
+
+def _propose_task_patterns(task_files, n):
+    """task_files: list[(bucket_name_or_None, Path)]. Returns TaskCandidate
+    list, best (highest-coverage) first."""
+    if not task_files:
+        return []
+
+    exact_counts = Counter((bucket, f.name) for bucket, f in task_files)
+    exact_examples = {}
+    for bucket, f in task_files:
+        exact_examples.setdefault((bucket, f.name), str(f))
+
+    candidates = [
+        TaskCandidate(
+            glob="{}/{}".format(bucket, name) if bucket else name,
+            coverage=count,
+            example=exact_examples[(bucket, name)],
+        )
+        for (bucket, name), count in exact_counts.most_common()
+    ]
+
+    full_coverage = [c for c in candidates if c.coverage == n]
+    if full_coverage:
+        return full_coverage
+
+    # Basenames vary per participant (e.g. embed the participant ID). If
+    # every participant folder has exactly one task-bucket file, a wildcard
+    # is the safe generalization. The participant dir is the bucket folder's
+    # parent (or the file's own parent, if there's no bucket subfolder).
+    per_participant = {}
+    for bucket, f in task_files:
+        participant_dir = f.parent.parent if bucket else f.parent
+        per_participant.setdefault(participant_dir, []).append((bucket, f))
+    if len(per_participant) == n and all(len(v) == 1 for v in per_participant.values()):
+        entries = [v[0] for v in per_participant.values()]
+        buckets = {b for b, _ in entries if b}
+        ext_set = {f.suffix.lower() for _, f in entries}
+        bucket = next(iter(buckets)) if len(buckets) == 1 else None
+        ext = next(iter(ext_set)) if len(ext_set) == 1 else ""
+        glob = "{}/*{}".format(bucket, ext) if bucket else "*{}".format(ext)
+        example = str(entries[0][1])
+        return [TaskCandidate(glob=glob, coverage=n, example=example)]
+
+    # Multiple, differently-named files per participant with no shared exact
+    # name -- return the partial-coverage exact matches for manual review.
+    return sorted(candidates, key=lambda c: -c.coverage)

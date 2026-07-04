@@ -11,11 +11,13 @@ through unchanged by get_config().
 """
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QFormLayout, QLineEdit, QCheckBox, QComboBox,
-    QDoubleSpinBox, QSpinBox, QGroupBox, QDialogButtonBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QCheckBox,
+    QComboBox, QDoubleSpinBox, QSpinBox, QGroupBox, QDialogButtonBox,
+    QPushButton, QFileDialog, QMessageBox, QInputDialog,
 )
 
 from modules.pyMotion.core.batch_config import BatchConfig, BatchLayout, EMGProcessingParams
+from modules.pyMotion.core.batch_scan import detect_layout
 
 
 class BatchConfigDialog(QDialog):
@@ -28,6 +30,14 @@ class BatchConfigDialog(QDialog):
 
         layout_group = QGroupBox(self.tr("Batch Layout"))
         form1 = QFormLayout(layout_group)
+
+        detect_row = QHBoxLayout()
+        self.detect_btn = QPushButton(self.tr("Detect from folder…"))
+        self.detect_btn.clicked.connect(self._onDetectFromFolder)
+        detect_row.addWidget(self.detect_btn)
+        detect_row.addStretch()
+        form1.addRow(detect_row)
+
         self.task_type_edit = QLineEdit(cfg.layout.task_type)
         form1.addRow(self.tr("Task type:"), self.task_type_edit)
         self.participant_glob_edit = QLineEdit(cfg.layout.participant_glob)
@@ -94,6 +104,60 @@ class BatchConfigDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _onDetectFromFolder(self):
+        """Inspect a real folder tree and pre-fill the layout fields below,
+        instead of asking the user to hand-write glob patterns. Heuristic --
+        every field it touches stays editable afterward, nothing is applied
+        silently."""
+        folder = QFileDialog.getExistingDirectory(
+            self, self.tr("Select batch root folder to inspect"), ""
+        )
+        if not folder:
+            return
+
+        suggestion = detect_layout(folder)
+
+        if not suggestion.task_candidates and not suggestion.mvc_glob:
+            QMessageBox.warning(
+                self, self.tr("Detect from folder"),
+                "\n".join(suggestion.warnings) or self.tr("Nothing usable was detected."),
+            )
+            return
+
+        self.participant_glob_edit.setText(suggestion.participant_glob)
+        self.mvc_glob_edit.setText(suggestion.mvc_glob)
+
+        chosen_task_glob = ""
+        if len(suggestion.task_candidates) == 1:
+            chosen_task_glob = suggestion.task_candidates[0].glob
+        elif len(suggestion.task_candidates) > 1:
+            options = [
+                "{}  ({}/{} participants, e.g. {})".format(
+                    c.glob, c.coverage, suggestion.participant_count, c.example
+                )
+                for c in suggestion.task_candidates
+            ]
+            choice, ok = QInputDialog.getItem(
+                self, self.tr("Select task file"),
+                self.tr(
+                    "Multiple task files were found per participant -- a batch "
+                    "covers exactly one task. Pick the one this config is for:"
+                ),
+                options, 0, False,
+            )
+            if ok:
+                chosen_task_glob = suggestion.task_candidates[options.index(choice)].glob
+        if chosen_task_glob:
+            self.emg_file_edit.setText(chosen_task_glob)
+
+        if suggestion.warnings:
+            QMessageBox.information(
+                self, self.tr("Detect from folder"),
+                self.tr("Layout fields were pre-filled from {} -- review before saving.\n\n{}").format(
+                    folder, "\n".join(suggestion.warnings)
+                ),
+            )
 
     def get_config(self) -> BatchConfig:
         layout = BatchLayout(
