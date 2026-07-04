@@ -18,3 +18,5 @@ from . custom_grips import CustomGrip
 from .emg_pipeline_panel import EMGPipelinePanel, EMGStepCard
 from .channel_mapping_panel import ChannelMappingPanel
 from .batch_config_dialog import BatchConfigDialog
+from .exit_confirm_dialog import ExitConfirmDialog
+from .splash_screen import MyotionSplashScreen

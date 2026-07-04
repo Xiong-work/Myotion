@@ -1166,10 +1166,11 @@ class MainWindow(QMainWindow):
     sigUpdateParticipants = Signal()
     sigAsyncLoadError = Signal(str)
 
-    def __init__(self, language, sys_log):
+    def __init__(self, language, sys_log, show_immediately=True):
         QMainWindow.__init__(self)
 
         self.language = language
+        self._show_immediately = show_immediately
 
         # SET AS GLOBAL WIDGETS
         # ///////////////////////////////////////////////////////////////
@@ -1405,7 +1406,12 @@ class MainWindow(QMainWindow):
         # ///////////////////////////////////////////////////////////////
 
         # self.show()
-        self.showMaximized()
+        # show_immediately=False (splash-screen startup path) defers this to
+        # __main__, which calls showMaximized() itself only after the splash
+        # has finished -- otherwise the maximized window becomes visible
+        # right here, mid-construction, well before the splash closes.
+        if self._show_immediately:
+            self.showMaximized()
 
         # SET CUSTOM THEME
         # ///////////////////////////////////////////////////////////////
@@ -5611,6 +5617,10 @@ class MainWindow(QMainWindow):
 
 
     def closeEvent(self, event):  # Window close event handler.
+        if not ExitConfirmDialog.confirm(self):
+            event.ignore()
+            return
+
         # ── Qt WebEngine teardown fix ──────────────────────────────────────
         # Profiles for QPlotView / StatsChartView have no Qt parent (lifetime
         # is controlled by the Python wrapper's refcount).  During Python
@@ -5703,6 +5713,10 @@ if __name__ == "__main__":
     qApp = QApplication(sys.argv)
     qApp.setWindowIcon(QIcon(":/images/Myotion_logo.png"))
 
+    splash = MyotionSplashScreen()
+    splash.start()
+    qApp.processEvents()  # paint the splash before the (synchronous) UI build below
+
     # get language, default en
     language = args.lang
     if language == None:
@@ -5714,7 +5728,9 @@ if __name__ == "__main__":
         if translator.load(":/qm/CN.qm"):
             qApp.installTranslator(translator)
 
-    window = MainWindow(language, sys_log)
+    window = MainWindow(language, sys_log, show_immediately=False)
+    splash.finish()
+    window.showMaximized()
     exit_code = qApp.exec()
     sys_log.close()
     sys.exit(exit_code)
