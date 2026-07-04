@@ -146,6 +146,65 @@ def build_scatter(
     return fig
 
 
+def build_generic_chart(
+    df: pd.DataFrame,
+    dv: str,
+    x_col: str,
+    color_col: str | None,
+    chart_type: str,
+) -> go.Figure | None:
+    """
+    Build a plotly Figure for imported external data, using whatever column
+    names the user chose (within/between factors) instead of the fixed
+    Channel/Group columns build_chart() assumes.
+    """
+    if df is None or df.empty or dv not in df.columns or x_col not in df.columns:
+        return None
+
+    plot_df = df.dropna(subset=[dv, x_col])
+    if plot_df.empty:
+        return None
+
+    common = dict(x=x_col, y=dv, labels={dv: dv})
+    if color_col and color_col in plot_df.columns:
+        cmap = _color_map(plot_df[color_col].dropna().unique().tolist())
+        common["color"] = color_col
+        common["color_discrete_map"] = cmap
+
+    if chart_type == "Box":
+        fig = px.box(plot_df, points="all", **common)
+    elif chart_type == "Bar (Mean±SD)":
+        group_cols = [x_col] + ([color_col] if color_col else [])
+        summary = plot_df.groupby(group_cols)[dv].agg(mean="mean", std="std").reset_index()
+        summary["std"] = summary["std"].fillna(0)
+        fig = go.Figure()
+        if color_col:
+            for level in sorted(summary[color_col].dropna().unique().tolist()):
+                sub = summary[summary[color_col] == level]
+                fig.add_trace(go.Bar(name=str(level), x=sub[x_col], y=sub["mean"],
+                                      error_y=dict(type="data", array=sub["std"].tolist())))
+            fig.update_layout(barmode="group")
+        else:
+            fig.add_trace(go.Bar(x=summary[x_col], y=summary["mean"],
+                                  error_y=dict(type="data", array=summary["std"].tolist())))
+        fig.update_layout(yaxis_title=dv)
+    elif chart_type == "Violin":
+        fig = px.violin(plot_df, box=True, points="all", **common)
+    elif chart_type == "Strip":
+        fig = px.strip(plot_df, **common)
+    else:
+        fig = px.box(plot_df, points="all", **common)
+
+    fig.update_layout(**_DARK_LAYOUT)
+    fig.update_layout(title=f"{dv} by {x_col}" + (f" and {color_col}" if color_col else ""),
+                      yaxis_title=dv)
+    fig.update_xaxes(showgrid=False, tickfont=dict(color="#f8f8f2"),
+                     title_font=dict(color="#f8f8f2"), linecolor="#44475a")
+    fig.update_yaxes(showgrid=False, tickfont=dict(color="#f8f8f2"),
+                     title_font=dict(color="#f8f8f2"), linecolor="#44475a")
+    return fig
+
+
 def _bar_mean_sd(df, metric, group_col, cmap, ylabel):
     summary = (
         df.groupby([group_col, "Channel"])[metric]

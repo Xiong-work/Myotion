@@ -100,3 +100,4 @@ dependencies:
       - pyside6-addons==6.5.3
       - pyside6-essentials==6.5.3
       - shiboken6==6.5.3
+      - pingouin==0.6.1

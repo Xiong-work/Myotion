@@ -7,72 +7,27 @@ the appropriate statistical test (with Shapiro-Wilk normality checking),
 and renders interactive plotly charts via a local QWebEngineView.
 """
 
+import os as _os
 import csv as _csv
 import pandas as pd
 
-from PySide6.QtCore import Qt, QUrl, QByteArray, QBuffer, QIODevice, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QSplitter, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QTreeWidget, QTreeWidgetItem,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QFileDialog, QMessageBox,
-)
-from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebEngineCore import (
-    QWebEngineProfile, QWebEnginePage,
-    QWebEngineUrlSchemeHandler, QWebEngineUrlRequestJob,
+    QAbstractItemView, QFileDialog, QMessageBox, QDialog, QStackedWidget,
 )
 
 from .summary_reader import (
     load_workspace_summary, available_metrics, available_channels, METRIC_LABELS,
 )
 from .stat_tests import run_comparison, describe_groups
-from .chart_builder import build_chart, figure_to_html, empty_html
-
-
-# ── HTML scheme handler (mirrors QPlotView's UrlSchemeHandler) ────────────────
-
-class _HtmlSchemeHandler(QWebEngineUrlSchemeHandler):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._data = b"<html><body></body></html>"
-
-    def set_html(self, html: str):
-        self._data = html.encode("utf-8")
-
-    def requestStarted(self, job: QWebEngineUrlRequestJob):
-        buf = QBuffer(job)
-        buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        buf.write(self._data)
-        job.reply(QByteArray(b"text/html"), buf)
-
-
-# ── Plotly chart surface ──────────────────────────────────────────────────────
-
-class StatsChartView(QWebEngineView):
-    """Renders plotly figures using the same local:// scheme as QPlotView."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        # No Qt parent for profile — Python reference-counting controls its
-        # lifetime.  Handler parented to profile (must outlive the profile).
-        # setPage() reparents the page into self's Qt child tree, so page is
-        # destroyed before the profile when the view is torn down.
-        self._profile = QWebEngineProfile()
-        self._handler = _HtmlSchemeHandler(self._profile)
-        self._profile.installUrlSchemeHandler(b"local", self._handler)
-        page = QWebEnginePage(self._profile)
-        self.setPage(page)
-        self._url = QUrl("local://stats-chart")
-        self.show_placeholder("Assign participants to groups, then select a metric.")
-
-    def show_figure(self, fig):
-        self._handler.set_html(figure_to_html(fig))
-        self.setUrl(self._url)
-
-    def show_placeholder(self, msg: str = ""):
-        self._handler.set_html(empty_html(msg))
-        self.setUrl(self._url)
+from .chart_builder import build_chart
+from .chart_view import StatsChartView
+from .dataset import read_table, infer_columns
+from .import_dialog import ImportColumnDialog
+from .imported_panel import ImportedAnalysisPanel
 
 
 # ── Group assignment button ───────────────────────────────────────────────────
@@ -147,9 +102,11 @@ class StatsWidget(QWidget):
         super().__init__(parent)
         self._workspace_path: str | None = None
         self._df: pd.DataFrame | None = None
+        self._data_source_label: str = "No data loaded"
         self._groups: dict[str, str] = {}           # {participant: group_label}
         self._group_buttons: dict[str, GroupButton] = {}
         self._last_result: dict | None = None
+        self._imported_panel: ImportedAnalysisPanel | None = None
         self._setup_ui()
 
     # ── public API ────────────────────────────────────────────────────────────
@@ -169,7 +126,11 @@ class StatsWidget(QWidget):
         outer = QSplitter(Qt.Horizontal)
         outer.setHandleWidth(2)
         outer.addWidget(self._build_left_panel())
-        outer.addWidget(self._build_right_panel())
+
+        self._right_stack = QStackedWidget()
+        self._right_stack.addWidget(self._build_right_panel())  # index 0: workspace view
+        outer.addWidget(self._right_stack)
+
         outer.setSizes([230, 900])
         outer.setStretchFactor(0, 0)
         outer.setStretchFactor(1, 1)
@@ -193,6 +154,12 @@ class StatsWidget(QWidget):
         vl.setSpacing(6)
 
         vl.addWidget(self._lbl("Participants", bold=True))
+
+        self._source_label = self._lbl(
+            self._data_source_label, color="#6272a4", size=10
+        )
+        self._source_label.setWordWrap(True)
+        vl.addWidget(self._source_label)
 
         self._participant_tree = QTreeWidget()
         self._participant_tree.setHeaderLabels(["Name", "Group"])
@@ -225,6 +192,16 @@ class StatsWidget(QWidget):
         btn_refresh.setCursor(Qt.PointingHandCursor)
         btn_refresh.clicked.connect(self._reload_data)
         vl.addWidget(btn_refresh)
+
+        btn_import = QPushButton("Import Data File…")
+        btn_import.setStyleSheet(
+            "QPushButton{background:#44475a;color:#f8f8f2;border-radius:4px;"
+            "padding:5px;font-size:12px;border:none;}"
+            "QPushButton:hover{background:#6272a4;}"
+        )
+        btn_import.setCursor(Qt.PointingHandCursor)
+        btn_import.clicked.connect(self._import_external_file)
+        vl.addWidget(btn_import)
 
         return panel
 
@@ -353,17 +330,62 @@ class StatsWidget(QWidget):
     # ── data ──────────────────────────────────────────────────────────────────
 
     def _reload_data(self):
+        self._right_stack.setCurrentIndex(0)
         if not self._workspace_path:
             self._df = None
             self._groups.clear()
+            self._set_source_label("No data loaded")
             self._refresh_participant_list()
             self._refresh_combos()
             self._chart_view.show_placeholder("No workspace loaded.")
             return
         self._df = load_workspace_summary(self._workspace_path)
+        self._set_source_label(f"Workspace: {_os.path.basename(self._workspace_path)}")
         self._refresh_participant_list()
         self._refresh_combos()
         self._update_chart()
+
+    def _set_source_label(self, text: str):
+        self._data_source_label = text
+        self._source_label.setText(text)
+
+    def _import_external_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Data File", "", "Data Files (*.csv *.xlsx *.xls)"
+        )
+        if not path:
+            return
+
+        try:
+            df = read_table(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", str(e))
+            return
+
+        non_numeric, numeric = infer_columns(df)
+        if not numeric:
+            QMessageBox.warning(self, "Import", "No numeric columns found in this file.")
+            return
+
+        dialog = ImportColumnDialog(df, non_numeric, numeric, _os.path.basename(path), self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        dataset = dialog.dataset()
+        if dataset is None:
+            return
+
+        self._workspace_path = None
+        self._df = None
+        self._set_source_label(f"Imported: {dataset.source_label}")
+        self._refresh_participant_list_for_subjects(dataset.subjects())
+
+        if self._imported_panel is not None:
+            self._right_stack.removeWidget(self._imported_panel)
+            self._imported_panel.deleteLater()
+        self._imported_panel = ImportedAnalysisPanel(dataset)
+        self._right_stack.addWidget(self._imported_panel)
+        self._right_stack.setCurrentWidget(self._imported_panel)
 
     def _refresh_participant_list(self):
         self._participant_tree.clear()
@@ -379,6 +401,15 @@ class StatsWidget(QWidget):
             btn.groupChanged.connect(self._on_group_changed)
             self._participant_tree.setItemWidget(item, 1, btn)
             self._group_buttons[name] = btn
+
+    def _refresh_participant_list_for_subjects(self, subjects: list):
+        """Read-only subject list for imported data — grouping comes from the
+        chosen within/between factor columns, not manual per-subject tagging."""
+        self._participant_tree.clear()
+        self._group_buttons.clear()
+        self._groups.clear()
+        for name in subjects:
+            QTreeWidgetItem(self._participant_tree, [str(name), ""])
 
     def _refresh_combos(self):
         if self._df is None or self._df.empty:
