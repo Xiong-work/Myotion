@@ -15,20 +15,47 @@ _FP_CHANNEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Vicon Plug-in-Gait (and similar) model outputs -- joint angles, forces,
+# moments, powers -- are stored in the same POINT block as real 3D markers;
+# C3D has no dedicated "model output" section, so the only way to tell them
+# apart is the label naming convention (e.g. "LKneeAngles", "RHipMoment",
+# "LNormalisedGRF", "CentreOfMassFloor"). The Kinematics Inspection module
+# only needs Angles -- Forces/Moments/Powers/ground-reaction/centre-of-mass
+# are recognised only so they can be excluded from the marker list, never
+# rendered as 3D marker dots.
+_MODEL_OUTPUT_RE = re.compile(r"(?:Angles?|Forces?|Moments?|Powers?|GRF)$", re.IGNORECASE)
+_MODEL_OUTPUT_EXTRA_NAMES = {"centreofmass", "centreofmassfloor"}
+_ANGLE_OUTPUT_RE = re.compile(r"Angles?$", re.IGNORECASE)
+
+
+def _is_model_output(label):
+    if _MODEL_OUTPUT_RE.search(label):
+        return True
+    return label.lower() in _MODEL_OUTPUT_EXTRA_NAMES
+
+
+def _is_angle_output(label):
+    return bool(_ANGLE_OUTPUT_RE.search(label))
+
 
 class kinematic:
-    def __init__(self, file=""):
+    # preparsed_c3d: optional already-loaded c3dFile for *file* -- lets a
+    # caller that also needs an emg() from the same combined C3D (e.g.
+    # batch_scan.build_participant()) parse it once instead of twice.
+    def __init__(self, file="", preparsed_c3d=None):
         self.kmtFile = file
 
         # label : array
         self.data = None
         self.realpoints = {}
+        self.anglelabels = []   # Model-output Angle labels (e.g. "LKneeAngles")
+        self.anglepoints = {}   # same shape as realpoints, kept separate -- never rendered as 3D markers
         self.length = 0
         self.events = []        # list[TrialEvent] — from C3D EVENT:* params
         self.force_plates = []  # list[ForcePlateGroup] — from C3D analog channels
 
         if len(file):
-            self.setFile(file)
+            self.setFile(file, c3d_obj=preparsed_c3d)
 
     def isValid(self):
         return not self.data == None
@@ -77,7 +104,7 @@ class kinematic:
     def isC3D(self, f):
         return f.endswith(".c3d")
 
-    def setFile(self, f):
+    def setFile(self, f, c3d_obj=None):
         self.kmtFile = f
 
         if not self.isC3D(f):
@@ -89,7 +116,7 @@ class kinematic:
 
         # load file
         try:
-            c3d = c3dFile(f)
+            c3d = c3d_obj if c3d_obj is not None else c3dFile(f)
             self.data = c3d.points
             self.point_fs = c3d.point_fs
             self.analog_fs = c3d.analog_fs
@@ -101,11 +128,22 @@ class kinematic:
             self.manufacturer = c3d.manufacturer.string_value if c3d.manufacturer else ""
             self.software = c3d.software.string_value if c3d.software else ""
 
-            self.reallabels = list(
-                filter(lambda x: (self.manufacturer == 'VICON' and self.ismarker(x) and self.isrealmarker(x)) or self.manufacturer != 'VICON', self.labels)
-            )
+            # Real markers only -- excludes both Plug-in-Gait virtual markers
+            # (segment-axis O/A/L/P quads) and model-output points (Angles/
+            # Forces/Moments/Powers/etc, see _is_model_output()). Applied
+            # regardless of manufacturer -- these are naming conventions, not
+            # something only Vicon-labeled files can have, and the previous
+            # exact-case "VICON" check silently disabled all filtering for
+            # any file whose manufacturer string wasn't that exact case
+            # (e.g. real files report "Vicon", not "VICON").
+            self.anglelabels = [x for x in self.labels if _is_angle_output(x)]
+            self.reallabels = [
+                x for x in self.labels
+                if not _is_model_output(x) and self.isrealmarker(x)
+            ]
             for joint in self.reallabels:
                 self.realpoints[joint] = self.data[joint]
+            self.anglepoints = {joint: self.data[joint] for joint in self.anglelabels}
 
             self.events = c3d.events  # list[TrialEvent], [] if none in file
             self.force_plates = self._load_force_plates(c3d)

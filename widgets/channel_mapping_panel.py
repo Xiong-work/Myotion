@@ -12,10 +12,11 @@ safer than threading a new "batch mode" through a working, unrelated dialog.
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem, QComboBox, QCompleter,
+    QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem, QComboBox, QCompleter, QHeaderView,
 )
 
 from modules.pyMotion.core.muscleName import muscleName
+from modules.pyMotion.core.muscle_guess import _guess_muscle_from_channel
 
 
 class ChannelMappingPanel(QWidget):
@@ -60,7 +61,7 @@ class ChannelMappingPanel(QWidget):
             self.table.setItem(i, 0, item)
             self.table.setCellWidget(i, 1, self._muscle_combo(chan))
             self.table.setCellWidget(i, 2, self._mvc_combo(chan))
-        self.table.resizeColumnsToContents()
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
 
     # ------------------------------------------------------------------
@@ -68,11 +69,6 @@ class ChannelMappingPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _auto_guess_muscles(self):
-        # Deferred import: avoids a circular import at module load time
-        # (main.py imports `from widgets import *`), same pattern main.py's
-        # own _get_muscle_bases() already uses for this reason.
-        from main import _guess_muscle_from_channel
-
         for c in self.channels:
             guess = _guess_muscle_from_channel(c)
             if guess is None and self.workspace is not None:

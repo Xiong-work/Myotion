@@ -10,14 +10,28 @@ processing". Any existing channel_mapping on the config passed in is carried
 through unchanged by get_config().
 """
 
+import os
+import re
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QCheckBox,
     QComboBox, QDoubleSpinBox, QSpinBox, QGroupBox, QDialogButtonBox,
     QPushButton, QFileDialog, QMessageBox, QInputDialog,
 )
 
-from modules.pyMotion.core.batch_config import BatchConfig, BatchLayout, EMGProcessingParams
+from modules.pyMotion.core.batch_config import (
+    BatchConfig, BatchLayout, ChannelMapping, EMGProcessingParams,
+)
 from modules.pyMotion.core.batch_scan import detect_layout
+
+
+def _task_type_from_glob(glob):
+    """Derive a short, human-readable task name from a detected task-file
+    glob, for pre-filling "Task type" and naming a saved config -- e.g.
+    "Tasks/lift_stitched.c3d" -> "lift" ("_stitched" is our own stitching
+    output suffix, not part of the task's real name)."""
+    stem = os.path.splitext(os.path.basename(glob))[0]
+    return re.sub(r'_stitched$', '', stem, flags=re.IGNORECASE)
 
 
 class BatchConfigDialog(QDialog):
@@ -25,6 +39,7 @@ class BatchConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(self.tr("Batch Config"))
         self._channel_mapping = cfg.channel_mapping  # passthrough, not edited here
+        self._last_suggestion = None  # set by _onDetectFromFolder; feeds sibling_task_configs()
 
         layout = QVBoxLayout(self)
 
@@ -117,6 +132,7 @@ class BatchConfigDialog(QDialog):
             return
 
         suggestion = detect_layout(folder)
+        self._last_suggestion = suggestion
 
         if not suggestion.task_candidates and not suggestion.mvc_glob:
             QMessageBox.warning(
@@ -150,6 +166,8 @@ class BatchConfigDialog(QDialog):
                 chosen_task_glob = suggestion.task_candidates[options.index(choice)].glob
         if chosen_task_glob:
             self.emg_file_edit.setText(chosen_task_glob)
+            if not self.task_type_edit.text().strip():
+                self.task_type_edit.setText(_task_type_from_glob(chosen_task_glob))
 
         if suggestion.warnings:
             QMessageBox.information(
@@ -159,14 +177,8 @@ class BatchConfigDialog(QDialog):
                 ),
             )
 
-    def get_config(self) -> BatchConfig:
-        layout = BatchLayout(
-            task_type=self.task_type_edit.text().strip(),
-            participant_glob=self.participant_glob_edit.text().strip() or "*",
-            emg_file=self.emg_file_edit.text().strip() or "*.c3d",
-            mvc_glob=self.mvc_glob_edit.text().strip(),
-        )
-        processing = EMGProcessingParams(
+    def _read_processing(self) -> EMGProcessingParams:
+        return EMGProcessingParams(
             dc_offset_enable=self.dc_offset_check.isChecked(),
             bandpass_enable=self.bandpass_check.isChecked(),
             bandpass_cutoff_l=self.bandpass_l.value(),
@@ -181,4 +193,47 @@ class BatchConfigDialog(QDialog):
                 "trial_max" if self.norm_type_combo.currentIndex() == 1 else "mvc"
             ),
         )
-        return BatchConfig(layout=layout, channel_mapping=self._channel_mapping, processing=processing)
+
+    def get_config(self) -> BatchConfig:
+        layout = BatchLayout(
+            task_type=self.task_type_edit.text().strip(),
+            participant_glob=self.participant_glob_edit.text().strip() or "*",
+            emg_file=self.emg_file_edit.text().strip() or "*.c3d",
+            mvc_glob=self.mvc_glob_edit.text().strip(),
+        )
+        return BatchConfig(
+            layout=layout, channel_mapping=self._channel_mapping, processing=self._read_processing()
+        )
+
+    def sibling_task_configs(self):
+        """Other task candidates found by the last "Detect from folder" run,
+        besides whichever one ended up in the Task file glob field above --
+        one BatchConfig per remaining candidate, sharing this dialog's
+        current participant/MVC glob and EMG processing settings but with an
+        empty channel_mapping (mapped later, per task, during Batch Import).
+
+        A batch root often holds several tasks recorded per participant
+        (e.g. lift/squat/gait) but a BatchConfig is single-task by
+        convention -- this lets the caller save a ready-to-use .toml for
+        every detected task in one step, instead of only the one chosen
+        here. Empty if detect was never run, or found just one task.
+        """
+        if not self._last_suggestion or len(self._last_suggestion.task_candidates) < 2:
+            return []
+        current_glob = self.emg_file_edit.text().strip()
+        participant_glob = self.participant_glob_edit.text().strip() or "*"
+        mvc_glob = self.mvc_glob_edit.text().strip()
+        processing = self._read_processing()
+
+        result = []
+        for c in self._last_suggestion.task_candidates:
+            if c.glob == current_glob:
+                continue
+            layout = BatchLayout(
+                task_type=_task_type_from_glob(c.glob),
+                participant_glob=participant_glob,
+                emg_file=c.glob,
+                mvc_glob=mvc_glob,
+            )
+            result.append(BatchConfig(layout=layout, channel_mapping=ChannelMapping(), processing=processing))
+        return result

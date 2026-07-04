@@ -1,5 +1,5 @@
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QVBoxLayout, QInputDialog, QMenu, QMessageBox, QTreeWidgetItem, QDialog
+from PySide6.QtWidgets import QVBoxLayout, QInputDialog, QMenu, QMessageBox, QTreeWidgetItem
 import numpy as np
 import scipy.signal as _sig
 
@@ -13,7 +13,7 @@ from modules.pyMotion.core.onset_detection import detect_emg_onsets
 from modules.pyMotion.core.cycle_detection import (
     detect_gait_cycles, detect_sit_stand_cycles, detect_squat_cycles,
     detect_trunk_flexion_cycles, detect_lifting_cycles, detect_pointing_cycles,
-    _cycles_from_events,
+    detect_peak_cycles, _cycles_from_events,
 )
 
 # Task type (playbar combo text) -> detector dispatch. Each takes
@@ -26,6 +26,10 @@ _CYCLE_DETECTORS = {
     "Running":                  lambda z, xyz, fs, fp, fp_fs: detect_gait_cycles(z, fs, fp_vertical=fp, fp_fs=fp_fs, mode="run"),
     "Sit-to-Stand":             lambda z, xyz, fs, fp, fp_fs: detect_sit_stand_cycles(z, fs),
     "Squat":                    lambda z, xyz, fs, fp, fp_fs: detect_squat_cycles(z, fs),
+    # CMJ (countermovement jump): crouch -> explode -> land is the same
+    # single continuous vertical-velocity burst shape as squat/sit-to-stand,
+    # so it reuses that detector rather than needing a new algorithm.
+    "CMJ":                      lambda z, xyz, fs, fp, fp_fs: detect_squat_cycles(z, fs),
     "Trunk Flexion/Extension":  lambda z, xyz, fs, fp, fp_fs: detect_trunk_flexion_cycles(z, fs),
     "Lifting":                  lambda z, xyz, fs, fp, fp_fs: detect_lifting_cycles(xyz, fs),
     "Pointing":                 lambda z, xyz, fs, fp, fp_fs: detect_pointing_cycles(xyz, fs),
@@ -70,6 +74,7 @@ class Controller:
         self.playbar.slider.setRange(0, model.kinematic_frames() - 1)
         self.playbar.set_frame_rate(model.kinematic_frame_rate())
         self.playbar.enable_playback()
+        self.top.set_kinematic_fps(model.kinematic_frame_rate())
 
         self.playbar.slider.valueChanged.connect(self.slider_valuechange)
         self.playbar.playbutton.clicked.connect(self.on_play_button_clicked)
@@ -81,6 +86,8 @@ class Controller:
         self.playbar.onsetDetectionToggled.connect(self._onOnsetDetectionToggled)
         self.playbar.cycleDetectionToggled.connect(self._onCycleDetectionToggled)
         self.playbar.manualCyclesRequested.connect(self._onManualCyclesRequested)
+        self.playbar.taskTypeChanged.connect(self._onTaskTypeChanged)
+        self.playbar.cycleMarkersVisibilityToggled.connect(self.top.set_cycle_markers_visible)
 
         # Cache the last-selected EMG channel so the onset button can act without re-click
         self._current_emg_channel = None
@@ -89,11 +96,22 @@ class Controller:
         # Task type last run through cycle detection — needed to know which
         # CycleStart_/CycleEnd_ events to remove when the button is unchecked.
         self._current_cycle_task = None
-        self.playbar.set_marker_options(
-            self.model.kinematic.reallabels if self.model.has_kinematics else []
+        # Cached, reused, non-modal (see ManualCyclesDialog docstring) — built
+        # lazily on first "Manual Cycles…" click.
+        self._manualCyclesDialog = None
+        self.playbar.set_source_options(
+            self.model.kinematic.reallabels if self.model.has_kinematics else [],
+            self.model.kinematic.anglelabels if self.model.has_kinematics else [],
+            [fp.plate_id for fp in self.model.force_plates],
         )
+        self._onTaskTypeChanged(self.playbar.current_task_type())
         self.step = 1
         self.labeltree.itemDoubleClicked.connect(self.tree_item_select)
+        # Last item plotted in Signals — replayed by _onAxisFilterChanged so
+        # switching the Axis combo re-plots instantly instead of only taking
+        # effect on the next double-click.
+        self._last_tree_item = None
+        self.playbar.axisFilterCombo.currentTextChanged.connect(self._onAxisFilterChanged)
 
         # Right-click on label tree → delete event
         self.labeltree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -144,6 +162,9 @@ class Controller:
             (self.playbar.onsetDetectionToggled, self._onOnsetDetectionToggled),
             (self.playbar.cycleDetectionToggled, self._onCycleDetectionToggled),
             (self.playbar.manualCyclesRequested, self._onManualCyclesRequested),
+            (self.playbar.taskTypeChanged, self._onTaskTypeChanged),
+            (self.playbar.cycleMarkersVisibilityToggled, self.top.set_cycle_markers_visible),
+            (self.playbar.axisFilterCombo.currentTextChanged, self._onAxisFilterChanged),
             (self.labeltree.itemDoubleClicked, self.tree_item_select),
             (self.labeltree.customContextMenuRequested, self._on_tree_context_menu),
         ):
@@ -151,6 +172,14 @@ class Controller:
                 signal.disconnect(slot)
             except (TypeError, RuntimeError):
                 pass  # already disconnected
+
+        # Owned by this controller (unlike the shared playbar/labeltree
+        # widgets above) — close it rather than leaving a hidden dialog
+        # parented to labeltree for every participant that ever used it.
+        if self._manualCyclesDialog is not None:
+            self._manualCyclesDialog.close()
+            self._manualCyclesDialog.deleteLater()
+            self._manualCyclesDialog = None
 
     def update(self):
         if self.playbar.is_playing():
@@ -200,6 +229,7 @@ class Controller:
         # skip if its a parent item
         if index.parent() == None:
             return
+        self._last_tree_item = index
         self.top.clear()
         name = index.text(0)
         do_filter = self.playbar.filterCheck.isChecked()
@@ -215,9 +245,24 @@ class Controller:
                 xs = self._apply_filter(xs, fs, cutoff_hz=6.0, order=2)
                 ys = self._apply_filter(ys, fs, cutoff_hz=6.0, order=2)
                 zs = self._apply_filter(zs, fs, cutoff_hz=6.0, order=2)
-            self.top.add_line(np.arange(0, len(xs)), xs, name + ".x", type="marker")
-            self.top.add_line(np.arange(0, len(ys)), ys, name + ".y", type="marker")
-            self.top.add_line(np.arange(0, len(zs)), zs, name + ".z", type="marker")
+            # x-axis here is frame index, not seconds -- leave rate at its
+            # default (1: the playback cursor's update() does frame / rate,
+            # and a frame-index axis needs frame / 1 = frame). Event/pick
+            # markers still land correctly because PlayPlotWidget._event_x()
+            # converts through the trial's kinematic fps (set below via
+            # set_kinematic_fps) instead of reusing this rate for that.
+            axis_filter = self.playbar.current_axis_filter()  # "All"/"X"/"Y"/"Z"
+            for suffix, data in (("x", xs), ("y", ys), ("z", zs)):
+                if axis_filter != "All" and axis_filter.lower() != suffix:
+                    continue
+                self.top.add_line(
+                    np.arange(0, len(data)), data, name + "." + suffix, type="marker"
+                )
+
+            # Keep the Cycle Detection source picker in sync with whatever
+            # the user is already looking at here.
+            category = "angle" if name in self.model.kinematic.anglelabels else "marker"
+            self.playbar.set_current_source(category, name, axis_filter)
         if name in self.model.emg.Channels:
             # Replay the user's pipeline (DC offset, filters, rectification) on the
             # full raw signal — no crop, no normalization — matching Time Domain analysis.
@@ -242,9 +287,17 @@ class Controller:
             x_time = list(np.arange(len(data)) / fp.fs)
             point_fs = self.model.kinematic_frame_rate()
             self.top.add_line(x_time, list(data), name, "channel", point_fs)
+            self.playbar.set_current_source("force_plate", "Plate {}".format(fp.plate_id), attr)
         # Re-draw events on the freshly populated plots
         for ev in self.model.events:
             self.top.add_event(ev)
+
+    def _onAxisFilterChanged(self, _text):
+        """Re-plot the currently-shown Signals item so switching the Axis
+        combo (All/X/Y/Z) takes effect instantly instead of only on the
+        next double-click."""
+        if self._last_tree_item is not None:
+            self.tree_item_select(self._last_tree_item)
 
     @staticmethod
     def _apply_filter(data, fs, cutoff_hz, order):
@@ -368,25 +421,57 @@ class Controller:
             self._current_emg_fs,
         )
 
-    def _run_cycle_detection(self, task_type, marker_name):
-        """Run task-type cycle detection for *marker_name*, update events and tree."""
-        detector = _CYCLE_DETECTORS.get(task_type)
-        if detector is None or not self.model.has_kinematics:
-            return
-        if marker_name not in self.model.kinematic.data.data:
-            return
+    _AXIS_INDEX = {"X": 0, "Y": 1, "Z": 2}
 
-        marker_pts = self.model.kinematic.data[marker_name]
-        marker_z = [p.xyz[2] for p in marker_pts]
-        marker_xyz = [p.xyz for p in marker_pts]
-        fs = self.model.kinematic.point_fs
-        fp_vertical, fp_fs = None, None
-        if self.model.force_plates:
-            plate = self.model.force_plates[0]
-            fp_vertical, fp_fs = plate.Fz, plate.fs
+    def _extract_source_signal(self, category, item, axis):
+        """Resolve a Cycle Detection source selection (see
+        PlayBarWidget.current_source()) into the arrays the detectors need.
+
+        Returns (signal, fs, xyz, fp_vertical, fp_fs):
+          - signal: 1D array for the chosen axis/component -- always used.
+          - xyz: (n, 3) array, only for marker/angle sources (reach-style
+            Lifting/Pointing detectors need the full 3D trajectory, not one
+            axis) -- None for a force-plate source.
+          - fp_vertical/fp_fs: populated only when the source itself is a
+            force plate (also usable as gait's optional GRF fallback).
+        All fields are None if the selection can't be resolved (e.g. no
+        kinematics, unknown item).
+        """
+        if category in ("marker", "angle"):
+            if not self.model.has_kinematics or item not in self.model.kinematic.data.data:
+                return None, None, None, None, None
+            pts = self.model.kinematic.data[item]
+            axis_idx = self._AXIS_INDEX.get(axis, 2)
+            signal = [p.xyz[axis_idx] for p in pts]
+            xyz = [p.xyz for p in pts]
+            fs = self.model.kinematic.point_fs
+            return signal, fs, xyz, None, None
+
+        if category == "force_plate":
+            try:
+                plate_id = int(item.split()[-1])
+                plate = next(p for p in self.model.force_plates if p.plate_id == plate_id)
+            except (ValueError, IndexError, StopIteration):
+                return None, None, None, None, None
+            signal = getattr(plate, axis, plate.Fz)
+            return signal, plate.fs, None, signal, plate.fs
+
+        return None, None, None, None, None
+
+    def _run_cycle_detection(self, task_type, method, category, item, axis):
+        """Run cycle detection for the given source selection, update events and tree."""
+        signal, fs, xyz, fp_vertical, fp_fs = self._extract_source_signal(category, item, axis)
+        if signal is None or not fs:
+            return
 
         try:
-            pairs = detector(marker_z, marker_xyz, fs, fp_vertical, fp_fs)
+            if method == "peak":
+                pairs = detect_peak_cycles(signal, fs)
+            else:
+                detector = _CYCLE_DETECTORS.get(task_type)
+                if detector is None:
+                    return
+                pairs = detector(signal, xyz if xyz is not None else signal, fs, fp_vertical, fp_fs)
         except Exception:
             pairs = []
 
@@ -464,37 +549,56 @@ class Controller:
             self.playbar.detectCyclesButton.setChecked(False)
             return
 
-        marker_name = self.playbar.current_source_marker()
-        if not marker_name:
+        category, item, axis = self.playbar.current_source()
+        if not item:
             QMessageBox.warning(
                 None,
                 self.labeltree.tr("Cycle Detection"),
-                self.labeltree.tr("Select a kinematics source marker first."),
+                self.labeltree.tr("Select a cycle-detection source first."),
             )
             self.playbar.detectCyclesButton.setChecked(False)
             return
 
         task_type = self.playbar.current_task_type()
+        method = self.playbar.current_detection_method()
         self._current_cycle_task = task_type
-        self._run_cycle_detection(task_type, marker_name)
+        self._run_cycle_detection(task_type, method, category, item, axis)
+
+    def _onTaskTypeChanged(self, task_type):
+        """Default the detection-method combo based on whether *task_type*
+        has a registered detector -- "Recommended" when it does, "Peak-based"
+        (the only method that actually works for it) when it doesn't, e.g. a
+        freshly-typed custom task name."""
+        self.playbar.set_method_recommendation(task_type in _CYCLE_DETECTORS)
 
     def _onManualCyclesRequested(self):
-        """Open the manual cycle-entry dialog for the selected task type.
+        """Open (or re-show) the manual cycle-entry dialog for the selected
+        task type.
 
         Available regardless of has_kinematics -- unlike auto-detection,
         typing in boundaries by hand needs no marker/force-plate data, so
         this is the only way to define reps for an EMG-only participant.
         Pre-fills from that task's existing Cycle* events (if any), so it
-        also works as a fine-tune-by-typed-numbers tool after auto-detect.
+        also works as a fine-tune tool (by typed numbers or by picking on
+        the plot) after auto-detect.
+
+        Non-modal (.show(), not .exec()): the dialog's "Pick on plot" rows
+        need clicks on self.top's plot to reach it, which a modal dialog
+        would block. Cached on self so re-clicking the button just re-shows
+        the same instance instead of rebuilding it.
         """
         task_type = self.playbar.current_task_type()
         existing = _cycles_from_events(self.model.extra_events, task_type)
-        dlg = ManualCyclesDialog(
-            task_type, existing, self.model.total_time(), parent=self.labeltree
-        )
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
+        if self._manualCyclesDialog is None:
+            self._manualCyclesDialog = ManualCyclesDialog(self.top, parent=self.labeltree)
+            self._manualCyclesDialog.accepted.connect(self._onManualCyclesAccepted)
+        self._manualCyclesDialog.set_task(task_type, existing, self.model.total_time())
+        self._manualCyclesDialog.show()
+        self._manualCyclesDialog.raise_()
+        self._manualCyclesDialog.activateWindow()
 
+    def _onManualCyclesAccepted(self):
+        dlg = self._manualCyclesDialog
         pairs, errors = dlg.get_pairs()
         if errors:
             QMessageBox.warning(
@@ -504,8 +608,8 @@ class Controller:
                 .format("\n".join(errors)),
             )
 
-        self._current_cycle_task = task_type
-        self._apply_cycle_pairs(task_type, pairs)
+        self._current_cycle_task = dlg.task_type
+        self._apply_cycle_pairs(dlg.task_type, pairs)
 
     def _onExportEvents(self):
         if self._export_events_callback:

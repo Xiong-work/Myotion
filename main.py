@@ -19,7 +19,6 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from thefuzz import fuzz as _fuzz
 import webbrowser
 import argparse
 import numpy as np
@@ -59,8 +58,11 @@ from qplotview import QPlotView
 from modules import *
 from widgets import *
 # _is_non_emg_channel is private and not re-exported by star imports; import
-# explicitly. _is_sync_channel is defined further down in this file.
+# explicitly.
 from modules.pyMotion.core.emg import _is_non_emg_channel
+from modules.pyMotion.core.muscle_guess import (
+    _is_sync_channel, _detect_side, _tokenise_channel, _get_muscle_bases, _guess_muscle_from_channel,
+)
 from modules.pyMotion.core.stitch import stitch_c3d, check_alignment, StitchError, load_emg_source
 from modules.kinematics.playplotview import PlayPlotWidget
 from modules.pyMotion.core.batch_config import (
@@ -70,6 +72,7 @@ from modules.pyMotion.core.batch_config import (
 from modules.pyMotion.core.batch_scan import (
     scan_batch_folder, channel_signature_groups, build_participant, reassign_mvc_file,
 )
+from modules.pyMotion.core.batch_stitch import find_stitch_pairs, stitch_all
 
 os.environ["QT_FONT_DPI"] = "96"  # FIX Problem for High DPI and Scale above 100%
 # SET AS GLOBAL WIDGETS
@@ -166,120 +169,52 @@ class BatchImportWorker(QThread):
         self.finished.emit(added)
 
 
-# ---------------------------------------------------------------------------
-# EMG channel → muscle-name smart guessing
-# ---------------------------------------------------------------------------
-
-# Strip known sensor-brand/system prefixes.
-_BRAND_STRIP_RE = re.compile(
-    r'^(?:'
-    r'(?:Delsys|Trigno|Noraxon|Cometa|BioNomadix|BIOPAC|Biometrics|Wave)[.\-_ ]?|'
-    r'Sensor\s*\d+[.\-_ ]|'
-    r'Ch(?:annel)?\s*\d+[.\-_ ]'
-    r')+',
-    re.IGNORECASE,
-)
-# Strip generic EMG prefix/suffix.
-_EMG_AFFIX_RE = re.compile(
-    r'(?:^EMG[.\-_ ]?|[.\-_ ]?EMG\s*\d*$|\s*\d+$)',
-    re.IGNORECASE,
-)
-# Sync / trigger channels that are never EMG signals.
-_SYNC_CHANNEL_RE = re.compile(
-    r'\b(?:sync|同步|reference|trigger|trig|clock)\b',
-    re.IGNORECASE,
-)
-
-# Lazily built on first call to avoid circular-import issues at module level.
-# (main.py → modules → ui_functions → main.py means muscleName is not yet defined
-#  when module-level code runs.)
-_MUSCLE_BASE_NAMES = None
-
-def _get_muscle_bases():
-    global _MUSCLE_BASE_NAMES
-    if _MUSCLE_BASE_NAMES is None:
-        from modules.pyMotion.core.muscleName import muscleName as _mn
-        seen, result = set(), []
-        for s, l in zip(_mn.short, _mn.long):
-            base_s, base_l = s[:-2], l[:-2]
-            if base_s not in seen:
-                seen.add(base_s)
-                result.append((base_s, base_l))
-        _MUSCLE_BASE_NAMES = result
-    return _MUSCLE_BASE_NAMES
-
-
-def _is_sync_channel(chan: str) -> bool:
-    """Return True if the channel is a sync/trigger line, not an EMG signal."""
-    return bool(_SYNC_CHANNEL_RE.search(chan))
-
-
-def _detect_side(chan: str):
-    """Return 'L', 'R', or None from channel label."""
-    if re.search(r'右|right\b', chan, re.IGNORECASE):
-        return 'R'
-    if re.search(r'左|left\b', chan, re.IGNORECASE):
-        return 'L'
-    m = re.search(r'[-_\s.]([RL])\s*$', chan, re.IGNORECASE)
-    if m:
-        return m.group(1).upper()
-    return None
-
-
-def _tokenise_channel(chan: str):
-    """Extract meaningful tokens from a channel label for muscle matching."""
-    text = _BRAND_STRIP_RE.sub('', chan)
-    text = re.sub(r'[一-鿿←-⇿→←↑↓]', ' ', text)  # CJK / arrows
-    text = re.sub(r'\b(?:right|left)\b', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'[-_.\\/()[\]]+', ' ', text)
-    return [t for t in text.upper().split()
-            if len(t) >= 2 and t not in ('L', 'R', 'LL', 'RR')]
-
-
-def _guess_muscle_from_channel(chan: str):
-    """Return best matching muscle short name (with side) from a raw channel label.
-
-    Strategy:
-      1. Detect side from Chinese chars (右=R, 左=L) or trailing -R/-L.
-      2. Strip brand prefix + EMG affix; try exact / substring match on short names.
-      3. Tokenise the remaining text; score each token with partial_ratio against
-         every muscle's LONG base name — handles abbreviations like "TIB ANT" for
-         "Tibialis Anterior" and "LUMBAR ES" for "Lumbar Erector Spinae".
-      4. Combine best-scoring base with detected side.
+class BatchStitchWorker(QThread):
+    """Runs stitch_all() one pair at a time so the progress dialog can show
+    which participant/task is currently being merged. Mutates each
+    StitchPair's status/out_path in place (see batch_stitch.py); never
+    touches the original kinematics/EMG source files.
     """
-    side = _detect_side(chan)
+    progress = Signal(int, str)
+    finished = Signal(list)  # the same list of StitchPair, now resolved
 
-    # Fast path: exact or substring match on short names after cleaning
-    cleaned = _BRAND_STRIP_RE.sub('', chan)
-    cleaned = _EMG_AFFIX_RE.sub('', cleaned)
-    normed = re.sub(r'[_\s.]+', '-', cleaned).strip('-').upper()
-    for short in muscleName.short:
-        if normed == short.upper():
-            return short
-    for short in muscleName.short:
-        if short.upper() in normed:
-            return short
+    def __init__(self, pairs, parent=None):
+        super().__init__(parent)
+        self._pairs = pairs
 
-    # Token-level matching against long muscle names
-    tokens = _tokenise_channel(chan)
-    if not tokens:
+    def run(self):
+        for i, p in enumerate(self._pairs):
+            if self.isInterruptionRequested():
+                break
+            stitch_all([p])
+            self.progress.emit(i + 1, "{}/{}".format(p.participant, p.stem))
+        self.finished.emit(self._pairs)
+
+
+# ---------------------------------------------------------------------------
+# Batch Stitch helpers
+# ---------------------------------------------------------------------------
+# (EMG channel -> muscle-name guessing (_is_sync_channel, _detect_side,
+#  _tokenise_channel, _get_muscle_bases, _guess_muscle_from_channel) moved to
+#  modules/pyMotion/core/muscle_guess.py -- widgets/channel_mapping_panel.py
+#  needs the same logic and can't safely reach back into main.py for it; see
+#  that module's docstring for why the old `from main import ...` deferred
+#  import crashed with a real NameError the first time it actually ran.)
+
+
+def _stitched_glob_for(emg_file):
+    """Best-effort: point an exact-filename Batch Import emg_file target
+    (e.g. "lift.c3d", the common case from "Detect from folder" proposing an
+    exact basename) at its stitched counterpart ("lift_stitched.c3d").
+    Returns None for wildcard globs (can't safely rewrite those) or if it's
+    already pointing at a stitched file.
+    """
+    if any(ch in emg_file for ch in "*?[]"):
         return None
-
-    best_score = 65.0
-    best_base_s = None
-    for base_s, base_l in _get_muscle_bases():
-        base_l_lo = base_l.lower()
-        scores = [_fuzz.partial_ratio(t.lower(), base_l_lo) for t in tokens]
-        avg = sum(scores) / len(scores)
-        if avg > best_score:
-            best_score = avg
-            best_base_s = base_s
-
-    if best_base_s is None:
+    base, _ext = os.path.splitext(emg_file)
+    if base.endswith("_stitched"):
         return None
-
-    candidate = best_base_s + ('-R' if side == 'R' else '-L' if side == 'L' else '')
-    return candidate if candidate in muscleName.short else None
+    return base + "_stitched.c3d"
 
 
 class EMGAddWindow(QMainWindow):
@@ -1295,19 +1230,31 @@ class MainWindow(QMainWindow):
         self._btn_clear_ws.clicked.connect(self.clearWorkspaceButtonClick)
         widgets.verticalLayout_11.insertWidget(0, self._btn_clear_ws)
 
-        # "Stitch Your Data" — merge a separately-recorded EMG file with a
-        # kinematics/force-plate .c3d into one combined .c3d, for hardware-synced
-        # trials that were saved to two files instead of one. Inserted above
-        # "Load EMG Data"; doesn't require an open workspace since it only writes
-        # a file to disk (loading the result still goes through the normal
-        # "Load EMG Data" flow, which does require one).
+        # "Stitch Your Data" / "Batch Stitch..." — side by side. Both merge a
+        # separately-recorded EMG file with a kinematics/force-plate .c3d
+        # into one combined .c3d (single pair vs. a whole batch folder), for
+        # hardware-synced trials saved to two files instead of one. Inserted
+        # above "Load EMG Data"; neither requires an open workspace since
+        # they only write files to disk (loading results still goes through
+        # the normal "Load EMG Data" / "Batch Import..." flow, which does).
         self._btn_stitch_data = QPushButton(self.tr("Stitch Your Data"))
         self._btn_stitch_data.setMinimumHeight(56)
         self._btn_stitch_data.setCursor(Qt.PointingHandCursor)
         stitch_icon = QIcon()
         stitch_icon.addFile(":/icons/images/icons/cil-link.png")
         self._btn_stitch_data.setIcon(stitch_icon)
-        widgets.verticalLayout_35.insertWidget(0, self._btn_stitch_data)
+
+        self._btn_batch_stitch = QPushButton(self.tr("Batch Stitch..."))
+        self._btn_batch_stitch.setMinimumHeight(56)
+        self._btn_batch_stitch.setCursor(Qt.PointingHandCursor)
+        _batch_stitch_icon = QIcon()
+        _batch_stitch_icon.addFile(":/icons/images/icons/cil-link.png")
+        self._btn_batch_stitch.setIcon(_batch_stitch_icon)
+
+        _stitch_row = QHBoxLayout()
+        _stitch_row.addWidget(self._btn_stitch_data)
+        _stitch_row.addWidget(self._btn_batch_stitch)
+        widgets.verticalLayout_35.insertLayout(0, _stitch_row)
 
         # "Align & Stitch..." — manual-offset counterpart to "Stitch Your Data",
         # for pairs stitchDataButtonClicked() declines to merge automatically
@@ -1382,6 +1329,7 @@ class MainWindow(QMainWindow):
 
         # EMG Page
         self._btn_stitch_data.clicked.connect(self.stitchDataButtonClicked)
+        self._btn_batch_stitch.clicked.connect(self.batchStitchButtonClicked)
         widgets.pushButton_10.clicked.connect(self.addEMGButtonClick)
         widgets.pushButton_11.clicked.connect(self.singleEMGButtonClick)
         widgets.listWidget.itemDoubleClicked.connect(
@@ -2064,6 +2012,110 @@ class MainWindow(QMainWindow):
             ).format(out_path, msg),
             QMessageBox.Ok,
         )
+
+    def batchStitchButtonClicked(self):
+        """Scan a batch root folder for participant/task pairs recorded as
+        separate kinematics + EMG files (e.g. lift.c3d + lift.mat) and stitch
+        every trusted pair in one pass -- the folder-wide counterpart to
+        "Stitch Your Data". Doesn't require an open workspace; only writes
+        new files to disk (loading the result still goes through Batch
+        Import, which does require one).
+        """
+        root = QFileDialog.getExistingDirectory(
+            self, self.tr("Select batch root folder to scan for unstitched pairs"),
+            self.home or "",
+        )
+        if not root:
+            return
+
+        pairs = find_stitch_pairs(root)
+        if not pairs:
+            QMessageBox.information(
+                self, self.tr("Batch Stitch"),
+                self.tr("No separately-recorded kinematics/EMG pairs found in this folder."),
+                QMessageBox.Ok,
+            )
+            return
+
+        pending = [p for p in pairs if p.status == "pending"]
+        ambiguous = [p for p in pairs if p.status == "ambiguous"]
+
+        lines = [
+            "{}/{}: {} + {}".format(
+                p.participant, p.stem, os.path.basename(p.kin_path), os.path.basename(p.emg_path)
+            )
+            for p in pending
+        ]
+        msg = self.tr("Found {} pair(s) to stitch:\n\n{}").format(len(pending), "\n".join(lines))
+        if ambiguous:
+            amb_lines = ["{}/{}: {}".format(p.participant, p.stem, p.message) for p in ambiguous]
+            msg += self.tr("\n\nSkipped ({} ambiguous -- review manually):\n{}").format(
+                len(ambiguous), "\n".join(amb_lines)
+            )
+
+        if not pending:
+            QMessageBox.warning(self, self.tr("Batch Stitch"), msg, QMessageBox.Ok)
+            return
+
+        reply = QMessageBox.question(
+            self, self.tr("Batch Stitch"), msg + self.tr("\n\nStitch these now?"),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._startBatchStitchWorker(pending, self._onBatchStitchFinished)
+
+    def _startBatchStitchWorker(self, pairs, on_finished):
+        """Run BatchStitchWorker with a progress dialog. Shared by the
+        standalone "Batch Stitch..." button and Batch Import's own
+        stitch-first prompt (see batchImportButtonClicked) -- on_finished(
+        pairs) is called once every pair has been attempted.
+        """
+        self._stitch_progress = QProgressDialog(
+            self.tr("Stitching pairs..."), self.tr("Cancel"), 0, len(pairs), self
+        )
+        self._stitch_progress.setWindowTitle(self.tr("Myotion-ing"))
+        self._stitch_progress.setWindowModality(Qt.WindowModal)
+        self._stitch_progress.setMinimumDuration(0)
+        self._stitch_progress.setValue(0)
+
+        self._stitch_worker = BatchStitchWorker(pairs, self)
+        self._stitch_worker.progress.connect(self._onBatchStitchProgress)
+        self._stitch_worker.finished.connect(on_finished)
+        self._stitch_progress.canceled.connect(self._stitch_worker.requestInterruption)
+        self._stitch_worker.start()
+
+    def _onBatchStitchProgress(self, count, name):
+        self._stitch_progress.setValue(count)
+        self._stitch_progress.setLabelText(self.tr("Stitching: {}").format(name))
+
+    def _onBatchStitchFinished(self, pairs):
+        self._stitch_progress.setValue(self._stitch_progress.maximum())
+        self._stitch_progress.close()
+
+        stitched = [p for p in pairs if p.status == "stitched"]
+        failed = [p for p in pairs if p.status in ("untrusted", "error")]
+
+        msg = self.tr("Stitched {} pair(s).").format(len(stitched))
+        if stitched:
+            msg += "\n\n" + "\n".join(
+                "{}/{}: wrote {}".format(p.participant, p.stem, os.path.basename(p.out_path))
+                for p in stitched
+            )
+        if failed:
+            fail_lines = "\n".join("{}/{}: {}".format(p.participant, p.stem, p.message) for p in failed)
+            msg += self.tr(
+                '\n\n{} pair(s) need manual alignment ("Align && Stitch..." on the '
+                "Kinematics Inspection page):\n{}"
+            ).format(len(failed), fail_lines)
+        if stitched:
+            msg += self.tr(
+                '\n\nUse "Batch Import..." next, pointing the task file at one of the '
+                "_stitched.c3d files."
+            )
+
+        QMessageBox.information(self, self.tr("Batch Stitch"), msg, QMessageBox.Ok)
 
     def alignStitchButtonClicked(self):
         """Open the manual alignment/stitch dialog for kinematics + EMG file
@@ -3116,19 +3168,26 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Lead with picking the config file itself: a native file-open dialog
-        # shows every .toml in a folder as you browse it (unlike a native
-        # folder-only picker, which can't show files at all), so this alone
-        # gives the "which configs are here" visual confirmation without any
-        # extra dialog. A batch config lives in its own batch root folder
-        # (same convention as Pose2Sim's Config.toml), so the root is just
-        # wherever the chosen config lives. Cancel -- no config yet -- falls
-        # back to picking the root folder and building one from scratch.
-        config_path, _ = QFileDialog.getOpenFileName(
-            self, self.tr("Select batch config (.toml) — Cancel to pick a folder and build one"),
-            self.home or "", "TOML Files (*.toml)",
-        )
-        if config_path:
+        # Ask up front rather than leading with a file-open dialog whose
+        # "Cancel to pick a folder instead" fallback wasn't obvious -- an
+        # explicit choice is clearer about what happens either way.
+        choice = QMessageBox(self)
+        choice.setWindowTitle(self.tr("Batch Import"))
+        choice.setText(self.tr("Does this batch already have a saved config file (.toml)?"))
+        with_btn = choice.addButton(self.tr("With config file(s)"), QMessageBox.ButtonRole.AcceptRole)
+        without_btn = choice.addButton(self.tr("Without"), QMessageBox.ButtonRole.ActionRole)
+        choice.addButton(QMessageBox.StandardButton.Cancel)
+        choice.setDefaultButton(with_btn)
+        choice.exec()
+        clicked = choice.clickedButton()
+
+        if clicked is with_btn:
+            config_path, _ = QFileDialog.getOpenFileName(
+                self, self.tr("Select batch config (.toml)"),
+                self.home or "", "TOML Files (*.toml)",
+            )
+            if not config_path:
+                return
             root = os.path.dirname(config_path)
             try:
                 cfg = load_batch_config(config_path)
@@ -3139,23 +3198,187 @@ class MainWindow(QMainWindow):
                     QMessageBox.Ok,
                 )
                 return
-        else:
+            self._continueBatchImport(root, cfg, config_path)
+        elif clicked is without_btn:
             root = QFileDialog.getExistingDirectory(
                 self, self.tr("Select batch root folder"), self.home or ""
             )
             if not root:
                 return
-            dlg = BatchConfigDialog(BatchConfig(), self)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                return
-            cfg = dlg.get_config()
-            config_path = None
+            self._offerUpfrontStitch(root)
+        # else: Cancel -- do nothing
 
+    def _offerUpfrontStitch(self, root):
+        """Quick heads-up before making the user hand-build a config for a
+        fresh batch root: kinematics/EMG recorded as separate files per task
+        is common enough (see batch_stitch.py) that it's worth checking for
+        upfront, rather than only discovering the need after the user has
+        already picked a task-file glob that turns out to match nothing
+        usable. Deliberately simple -- reuses find_stitch_pairs/stitch_all
+        as-is, no new pairing heuristics:
+          - "pending" pairs (unambiguous kin+EMG split, same stem) -> offer
+            to stitch right now.
+          - "ambiguous" pairs (e.g. two same-extension files with no shared
+            stem, so nothing here can safely guess which two go together)
+            -> just a heads-up pointing at manual "Align & Stitch...".
+        """
+        pairs = find_stitch_pairs(root)
+        pending = [p for p in pairs if p.status == "pending"]
+        ambiguous = [p for p in pairs if p.status == "ambiguous"]
+
+        if ambiguous:
+            preview = ", ".join("{}/{}".format(p.participant, p.stem) for p in ambiguous[:3])
+            if len(ambiguous) > 3:
+                preview += ", ..."
+            QMessageBox.information(
+                self, self.tr("Batch Import"),
+                self.tr(
+                    "{} item(s) look like they may need pairing but don't match a "
+                    'recognizable kinematics/EMG naming pattern (e.g. {}). These '
+                    'will need manual alignment via "Align & Stitch..." on the '
+                    "Kinematics Inspection page."
+                ).format(len(ambiguous), preview),
+                QMessageBox.Ok,
+            )
+
+        if pending:
+            preview = ", ".join("{}/{}".format(p.participant, p.stem) for p in pending[:3])
+            if len(pending) > 3:
+                preview += ", ..."
+            reply = QMessageBox.question(
+                self, self.tr("Batch Import"),
+                self.tr(
+                    "This folder has {} separately-recorded kinematics/EMG pair(s) "
+                    "(e.g. {}). Stitch them now before setting up the batch config?"
+                ).format(len(pending), preview),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self._startBatchStitchWorker(
+                    pending, lambda done: self._onUpfrontStitchFinished(done, root)
+                )
+            # Either way, don't fall through into building a config against
+            # data that (per the user's own answer) may still need stitching
+            # -- declining just cancels Batch Import back to whatever was
+            # already open, same as Cancel on the folder picker itself.
+            return
+
+        self._buildNewBatchConfig(root)
+
+    def _onUpfrontStitchFinished(self, pairs, root):
+        self._stitch_progress.setValue(self._stitch_progress.maximum())
+        self._stitch_progress.close()
+
+        failed = [p for p in pairs if p.status in ("untrusted", "error")]
+        if failed:
+            fail_lines = "\n".join(
+                "{}/{}: {}".format(p.participant, p.stem, p.message) for p in failed
+            )
+            QMessageBox.warning(
+                self, self.tr("Batch Stitch"),
+                self.tr(
+                    '{} pair(s) need manual alignment ("Align && Stitch..." on the '
+                    "Kinematics Inspection page):\n{}"
+                ).format(len(failed), fail_lines),
+                QMessageBox.Ok,
+            )
+
+        self._buildNewBatchConfig(root)
+
+    def _buildNewBatchConfig(self, root):
+        dlg = BatchConfigDialog(BatchConfig(), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        cfg = dlg.get_config()
+        siblings = dlg.sibling_task_configs()
+        config_path = self._saveDetectedBatchConfigs(root, cfg, siblings)
+        self._continueBatchImport(root, cfg, config_path)
+
+    def _saveDetectedBatchConfigs(self, root, cfg, siblings):
+        """Persist a freshly-built BatchConfig -- plus any sibling per-task
+        configs "Detect from folder" found alongside it (e.g. lift/squat/gait
+        recorded for the same cohort) -- to the batch root as .toml files,
+        so a later Batch Import for this folder can just pick a file instead
+        of rebuilding everything from scratch. Returns the path saved for
+        `cfg` itself (used as this session's config_path).
+
+        Never overwrites an existing file at the target name -- if one is
+        already there (e.g. re-running detection on the same folder), it's
+        left untouched and reported as already existing.
+        """
+        def _safe_name(task_type):
+            name = re.sub(r'[^\w\-]+', '_', task_type.strip()) if task_type else ""
+            return "batch_config_{}".format(name) if name else "batch_config"
+
+        chosen_path = None
+        saved, skipped = [], []
+        seen_paths = set()
+        for c in [cfg] + list(siblings):
+            path = os.path.join(root, "{}.toml".format(_safe_name(c.layout.task_type)))
+            if c is cfg:
+                chosen_path = path
+            if path in seen_paths:
+                # Two detected "tasks" collapsed to the same config name
+                # (e.g. differing only by file extension) -- keep whichever
+                # one got here first rather than re-checking/reporting the
+                # same path twice.
+                continue
+            seen_paths.add(path)
+            if os.path.isfile(path):
+                skipped.append(path)
+                continue
+            try:
+                save_batch_config(path, c)
+                saved.append(path)
+            except Exception as e:
+                logger.error("Failed to save batch config {}: {}".format(path, e))
+
+        if saved or skipped:
+            parts = []
+            if saved:
+                parts.append(self.tr("Created:\n") + "\n".join(saved))
+            if skipped:
+                parts.append(self.tr("Already existed, left untouched:\n") + "\n".join(skipped))
+            QMessageBox.information(
+                self, self.tr("Batch Import"),
+                self.tr("Saved batch config file(s) to {}:\n\n{}").format(root, "\n\n".join(parts)),
+                QMessageBox.Ok,
+            )
+        return chosen_path
+
+    def _continueBatchImport(self, root, cfg, config_path):
         candidates = scan_batch_folder(root, cfg.layout)
         ready = [c for c in candidates if c.status == "ready"]
         not_ready = [c for c in candidates if c.status != "ready"]
 
         if not ready:
+            # This folder might just need stitching first -- e.g. a
+            # participant/task pair recorded as separate kinematics + EMG
+            # files, which scan_batch_folder correctly can't validate as one
+            # usable trial. Offer to fix that instead of just failing.
+            pending_stitch = [p for p in find_stitch_pairs(root) if p.status == "pending"]
+            if pending_stitch:
+                preview = ", ".join(
+                    "{}/{}".format(p.participant, p.stem) for p in pending_stitch[:3]
+                )
+                if len(pending_stitch) > 3:
+                    preview += ", ..."
+                reply = QMessageBox.question(
+                    self, self.tr("Batch Import"),
+                    self.tr(
+                        "No usable participants found with the current config, but this "
+                        "folder looks like it has {} separately-recorded kinematics/EMG "
+                        "pair(s) that need stitching first (e.g. {}).\n\n"
+                        "Stitch them now and retry?"
+                    ).format(len(pending_stitch), preview),
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if reply == QMessageBox.Yes:
+                    self._startBatchStitchWorker(
+                        pending_stitch,
+                        lambda done: self._onInlineStitchFinished(done, root, cfg, config_path),
+                    )
+                    return
             QMessageBox.warning(
                 self, self.tr("Batch Import"),
                 self.tr("No usable participants found in this folder with the current config."),
@@ -3222,6 +3445,20 @@ class MainWindow(QMainWindow):
                 enabled=list(enabled), muscle=muscle, mvc_file=mvc_file
             )
 
+            # The "already mapped" branch below folds this into its confirm
+            # question, but map-once never showed it at all -- silently
+            # dropping participants (missing/ambiguous files, a different
+            # channel set than the cohort, already loaded) with no visible
+            # trace. Report it here so it isn't discovered only by counting.
+            if skip_lines:
+                QMessageBox.information(
+                    self, self.tr("Batch Import"),
+                    self.tr("Proceeding with {} participant(s). Skipped:\n{}").format(
+                        len(in_cohort), "\n".join(skip_lines)
+                    ),
+                    QMessageBox.Ok,
+                )
+
             if config_path:
                 reply = QMessageBox.question(
                     self, self.tr("Save Mapping"),
@@ -3279,6 +3516,67 @@ class MainWindow(QMainWindow):
             self._batch_import_worker.requestInterruption
         )
         self._batch_import_worker.start()
+
+    def _onInlineStitchFinished(self, pairs, root, cfg, config_path):
+        """Continuation of _continueBatchImport's stitch-first prompt: report
+        the stitch outcome, then retry the scan with the freshly-stitched
+        files present."""
+        self._stitch_progress.setValue(self._stitch_progress.maximum())
+        self._stitch_progress.close()
+
+        stitched = [p for p in pairs if p.status == "stitched"]
+        failed = [p for p in pairs if p.status in ("untrusted", "error")]
+
+        if failed:
+            fail_lines = "\n".join(
+                "{}/{}: {}".format(p.participant, p.stem, p.message) for p in failed
+            )
+            QMessageBox.warning(
+                self, self.tr("Batch Stitch"),
+                self.tr(
+                    '{} pair(s) need manual alignment ("Align && Stitch..." on the '
+                    "Kinematics Inspection page):\n{}"
+                ).format(len(failed), fail_lines),
+                QMessageBox.Ok,
+            )
+
+        if not stitched:
+            QMessageBox.warning(
+                self, self.tr("Batch Import"),
+                self.tr("No pairs could be stitched automatically; cannot continue with this config."),
+                QMessageBox.Ok,
+            )
+            return
+
+        # If the config was targeting one exact stem (the common case from
+        # "Detect from folder" proposing an exact basename), point it at the
+        # matching stitched output so the retry below succeeds without
+        # asking the user to re-pick the task file. A wildcard glob (e.g.
+        # "*.c3d") is left untouched -- rewriting it safely isn't possible,
+        # the retry will simply reveal whether it still needs adjustment.
+        new_emg_file = _stitched_glob_for(cfg.layout.emg_file)
+        updated = bool(new_emg_file) and any(
+            os.path.basename(p.out_path or "") == new_emg_file for p in stitched
+        )
+        if updated:
+            cfg.layout.emg_file = new_emg_file
+            QMessageBox.information(
+                self, self.tr("Batch Import"),
+                self.tr(
+                    "Stitched {} pair(s). Task file updated to '{}' -- retrying import."
+                ).format(len(stitched), new_emg_file),
+                QMessageBox.Ok,
+            )
+        else:
+            QMessageBox.information(
+                self, self.tr("Batch Import"),
+                self.tr("Stitched {} pair(s). Retrying import with the current config.").format(
+                    len(stitched)
+                ),
+                QMessageBox.Ok,
+            )
+
+        self._continueBatchImport(root, cfg, config_path)
 
     def _onBatchImportProgress(self, count, name):
         self._batch_import_progress.setValue(count)
@@ -4491,6 +4789,22 @@ class MainWindow(QMainWindow):
                     tr.setText(0, point)
                 marker_group.setExpanded(False)
                 treeItem.addChild(marker_group)
+            # Model outputs group — Angles only (Forces/Moments/Powers/etc are
+            # excluded entirely upstream, see kinematic.py's _is_model_output);
+            # its own subtree, separate from Markers, since these aren't 3D
+            # marker positions and are never rendered in the 3D viewport.
+            if k.isValid() and k.anglelabels:
+                angle_group = QTreeWidgetItem(treeItem)
+                angle_group.setText(0, "Model Outputs")
+                angles_node = QTreeWidgetItem(angle_group)
+                angles_node.setText(0, "Angles ({})".format(len(k.anglelabels)))
+                for label in k.anglelabels:
+                    tr = QTreeWidgetItem(angles_node)
+                    tr.setFlags(tr.flags() | Qt.ItemIsDragEnabled | Qt.ItemIsSelectable)
+                    tr.setText(0, label)
+                angle_group.setExpanded(False)
+                angles_node.setExpanded(False)
+                treeItem.addChild(angle_group)
             # EMG group
             emg_channels = emg.getChannels()
             if emg_channels:

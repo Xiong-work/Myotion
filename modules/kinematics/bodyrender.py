@@ -20,6 +20,43 @@ _WATERMARK_PATH = _os.path.normpath(
     )
 )
 
+# Lab (C3D) coordinate-system axes at the scene origin, and the text label
+# for each -- scene X = lab X, scene Y = lab Z (vertical/up), scene Z = lab Y
+# (see ForceWireItem/ForceVectorItem's own coordinate-mapping docstrings for
+# the same convention).
+_LAB_AXIS_LENGTH = 500
+_LAB_AXIS_LABELS = (
+    ("X", [_LAB_AXIS_LENGTH, 0, 0], QColor(255, 60, 60)),
+    ("Z", [0, _LAB_AXIS_LENGTH, 0], QColor(60, 220, 60)),
+    ("Y", [0, 0, _LAB_AXIS_LENGTH], QColor(80, 140, 255)),
+)
+_PLATE_AXIS_LENGTH = 120
+# Dimmed R/G/B (vs the lab axes' full-saturation colors) -- this engine's
+# BasicMaterial shader always outputs alpha=1.0 (no per-item transparency
+# support), so "more transparent" is approximated by muting the color instead.
+_PLATE_AXIS_COLORS = [[0.55, 0.25, 0.25], [0.25, 0.5, 0.25], [0.25, 0.35, 0.55]]
+
+
+def _plate_local_axes(corners_c3d):
+    """Derive a force plate's own local (X, Y, Z) unit direction vectors, in
+    scene space, from its corner geometry -- rather than assuming the plate
+    is aligned with the lab/global axes. Corners are ordered sequentially
+    around the perimeter (same assumption ForceWireItem already makes)."""
+    c = np.asarray(corners_c3d, dtype=float)
+    x_dir = c[1] - c[0]
+    y_dir = c[3] - c[0]
+    x_dir /= np.linalg.norm(x_dir)
+    y_dir /= np.linalg.norm(y_dir)
+    z_dir = np.cross(x_dir, y_dir)
+    z_dir /= np.linalg.norm(z_dir)
+    if z_dir[2] < 0:  # keep "up" pointing away from the floor (+C3D Z)
+        z_dir = -z_dir
+
+    def _to_scene(v):
+        return [float(v[0]), float(v[2]), float(v[1])]
+
+    return _to_scene(x_dir), _to_scene(y_dir), _to_scene(z_dir)
+
 
 class BodyRender(Base):
     def __init__(self, parent: QWidget = None) -> None:
@@ -51,7 +88,7 @@ class BodyRender(Base):
         self.rig = MovementRig(unitsPerSecond=100)
         self.rig.add(self.camera)
 
-        axes = AxesItem(axisLength=500)
+        axes = AxesItem(axisLength=_LAB_AXIS_LENGTH)
         grid = GridItem(size=5000, gridColor=[0.15, 0.15, 0.15], centerColor=[0.4, 0.4, 0.0])
         grid.rotateX(-pi / 2)
 
@@ -61,13 +98,23 @@ class BodyRender(Base):
     def paintGL(self) -> None:
         super().paintGL()
 
-        # One-time: add static force plate wireframes to the scene
+        # One-time: add static force plate wireframes + per-plate coordinate
+        # axes to the scene
         if not self._plate_geo_added and self.model is not None:
             for fp in getattr(self.model, "force_plates", []):
                 if fp.corners is not None:
                     wire = ForceWireItem(fp.corners)
                     self.scene.add(wire)
                     self._plate_geo.append(wire)
+                    c = fp.corners.mean(axis=0)  # C3D lab frame (Xc, Yc, Zc)
+                    plate_origin = [float(c[0]), float(c[2]), float(c[1])]  # -> scene coords
+                    plate_dirs = _plate_local_axes(fp.corners)
+                    plate_axes = AxesItem(
+                        axisLength=_PLATE_AXIS_LENGTH, origin=plate_origin, directions=plate_dirs,
+                        axisColors=_PLATE_AXIS_COLORS, lineWidth=2,
+                    )
+                    self.scene.add(plate_axes)
+                    self._plate_geo.append(plate_axes)
             self._plate_geo_added = True
 
         if self.point in self.scene.children:
@@ -194,10 +241,16 @@ class BodyRender(Base):
             return
         fps = getattr(self.model, "force_plates", [])
         sel = getattr(self, "_selected_marker", None)
-        if not fps and not sel:
-            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Lab coordinate-system axis labels (X/Y/Z), matching AxesItem's lines
+        axis_font = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        painter.setFont(axis_font)
+        for text, scene_pos, color in _LAB_AXIS_LABELS:
+            pos = self._project_to_screen(scene_pos)
+            if pos:
+                painter.setPen(color)
+                painter.drawText(pos[0] + 4, pos[1], text)
         # Force plate labels (cyan)
         if fps:
             fp_font = QFont("Segoe UI", 9)

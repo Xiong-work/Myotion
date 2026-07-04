@@ -18,9 +18,15 @@ detect_squat_cycles, detect_trunk_flexion_cycles, detect_lifting_cycles,
 and detect_pointing_cycles are thin wrappers (some with retuned defaults)
 over the two shared burst detectors, so the task-type dropdown can offer a
 distinct entry per task while sharing implementation where the underlying
-signal shape is the same. See detect_trunk_flexion_cycles' docstring for a
-noted simplification (single-marker vertical burst, not a true 2-marker
-trunk angle).
+signal shape is the same. CMJ also reuses detect_squat_cycles (controller.py's
+_CYCLE_DETECTORS) -- same crouch/explode/land vertical-burst shape. See
+detect_trunk_flexion_cycles' docstring for a noted simplification (single-
+marker vertical burst, not a true 2-marker trunk angle).
+
+A fourth, generic detector -- detect_peak_cycles() -- is a source/task-
+agnostic fallback (plain consecutive-peak pairing, no baseline/noise
+adaptation) for any source/task combination that doesn't have one of the
+three families above, selectable in the kinematics UI as "Peak-based".
 
 Also holds _cycles_from_events(), which parses the CycleStart_/CycleEnd_
 TrialEvent pairs these detectors produce back out of a trial's event list --
@@ -375,3 +381,28 @@ def detect_pointing_cycles(marker_xyz, fs, **kwargs):
     kwargs.setdefault("min_cycle_s", 0.25)
     kwargs.setdefault("window_below_s", 0.2)
     return detect_reach_cycles(marker_xyz, fs, **kwargs)
+
+
+def detect_peak_cycles(signal, fs, min_cycle_s=0.5):
+    """Generic fallback detector: one cycle per pair of consecutive local
+    maxima of *signal*, at least min_cycle_s apart.
+
+    Works on any 1D signal (a marker axis, an Angle component, or a force-
+    plate component) regardless of task type -- useful for a task with no
+    dedicated detector above (e.g. a custom-typed name), but simpler and
+    less noise-robust than the task-specific detectors: no baseline/quiet-
+    period noise estimation, just a plain distance-constrained peak search.
+
+    Returns list of (t_start_s, t_end_s), one entry per consecutive peak pair.
+    """
+    arr = np.asarray(signal, dtype=float)
+    if len(arr) < 3 or not fs:
+        return []
+
+    distance = max(1, int(min_cycle_s * fs))
+    peaks, _ = _sig.find_peaks(arr, distance=distance)
+    if len(peaks) < 2:
+        return []
+
+    peak_times = [i / fs for i in peaks]
+    return [(peak_times[i], peak_times[i + 1]) for i in range(len(peak_times) - 1)]
