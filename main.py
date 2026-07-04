@@ -24,7 +24,7 @@ import webbrowser
 import argparse
 import numpy as np
 
-from PySide6.QtCore import Qt, Signal, Slot, QTranslator, QSignalBlocker, QThread
+from PySide6.QtCore import Qt, Signal, Slot, QTranslator, QSignalBlocker, QThread, QSize
 from PySide6.QtGui import QIcon, QPalette, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -41,6 +41,12 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
     QHBoxLayout,
+    QToolButton,
+    QStyle,
+    QDialogButtonBox,
+    QProgressDialog,
+    QVBoxLayout,
+    QLabel,
 )
 from PySide6.QtWebEngineCore import QWebEngineUrlScheme
 
@@ -57,6 +63,13 @@ from widgets import *
 from modules.pyMotion.core.emg import _is_non_emg_channel
 from modules.pyMotion.core.stitch import stitch_c3d, check_alignment, StitchError, load_emg_source
 from modules.kinematics.playplotview import PlayPlotWidget
+from modules.pyMotion.core.batch_config import (
+    BatchConfig, ChannelMapping, load_batch_config, save_batch_config,
+    processing_to_emg_configure,
+)
+from modules.pyMotion.core.batch_scan import (
+    scan_batch_folder, channel_signature_groups, build_participant, reassign_mvc_file,
+)
 
 os.environ["QT_FONT_DPI"] = "96"  # FIX Problem for High DPI and Scale above 100%
 # SET AS GLOBAL WIDGETS
@@ -107,6 +120,50 @@ class BatchEMGWorker(QThread):
             except Exception as e:
                 self.error.emit("{}: {}".format(p.name, str(e)))
         self.finished.emit()
+
+
+class BatchImportWorker(QThread):
+    """Loads and maps every candidate into the workspace.
+
+    Deliberately does NOT run EMG processing itself -- that's the existing,
+    already-proven BatchEMGWorker's job, kicked off separately (see
+    MainWindow._onBatchImportFinished) once these participants are in the
+    workspace. This worker's only job is "get raw data + mapping applied and
+    added to the workspace".
+    """
+    progress = Signal(int, str)
+    finished = Signal(list)  # list of person objects successfully added
+    error = Signal(str)
+
+    def __init__(self, workspace, candidates, mapping, parent=None):
+        super().__init__(parent)
+        self._workspace = workspace
+        self._candidates = candidates
+        self._mapping = mapping
+
+    def run(self):
+        added = []
+        for i, cand in enumerate(self._candidates):
+            if self.isInterruptionRequested():
+                break
+            try:
+                p, e, kin = build_participant(cand, self._mapping)
+                # workspace.hasParticipant() compares by object identity (person
+                # has no __eq__), which would never match a freshly-built object
+                # -- name-based lookup is what confirmBtnClicked's own duplicate
+                # check uses (main.py), so mirror that here.
+                if self._workspace.findParticipant(p.name) is not None:
+                    self.error.emit(
+                        "{}: already exists in the workspace, skipped".format(p.name)
+                    )
+                    self.progress.emit(i + 1, cand.name)
+                    continue
+                self._workspace.addParticipant(p, e, kin)
+                added.append(p)
+                self.progress.emit(i + 1, cand.name)
+            except Exception as ex:
+                self.error.emit("{}: {}".format(cand.name, str(ex)))
+        self.finished.emit(added)
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +284,7 @@ def _guess_muscle_from_channel(chan: str):
 
 class EMGAddWindow(QMainWindow):
     finished = Signal(tuple)  # Signal emitted when the window closes, returning results.
+    batchImportRequested = Signal()  # user chose "Batch Import..." instead of a single-file add
 
     def __init__(self, workspace, home, width, height, parent=None):
         QMainWindow.__init__(self)
@@ -266,15 +324,26 @@ class EMGAddWindow(QMainWindow):
         hdr.setSectionResizeMode(1, QHeaderView.Fixed)
         hdr.sectionClicked.connect(self._onSelectHeaderClicked)
 
-        self._scan_folder_btn = QPushButton(self.tr("Scan Folder..."))
-        self._scan_folder_btn.setCursor(Qt.PointingHandCursor)
-        self._scan_folder_btn.setStyleSheet(
+        self._batch_import_btn = QPushButton(self.tr("Batch Import..."))
+        self._batch_import_btn.setCursor(Qt.PointingHandCursor)
+        self._batch_import_btn.setStyleSheet(
             "color:#f4f4f4;\n"
             "background-color: #333b46;\n"
+            "padding:8px 8px;\n"
+            "marging:2px 2px;\n"
             "border-radius:8px;"
         )
-        self.ui.horizontalLayout_2.addWidget(self._scan_folder_btn)
-        self._scan_folder_btn.clicked.connect(self._scanFolderClicked)
+        _batch_import_icon = QIcon()
+        _batch_import_icon.addFile(
+            "images/icons/cil-clone.png", QSize(), QIcon.Normal, QIcon.Off
+        )
+        self._batch_import_btn.setIcon(_batch_import_icon)
+        # Own row below Import File / Import MVC Files, right-aligned to match.
+        self._batch_import_row = QHBoxLayout()
+        self._batch_import_row.addStretch()
+        self._batch_import_row.addWidget(self._batch_import_btn)
+        self.ui.verticalLayout_3.insertLayout(1, self._batch_import_row)
+        self._batch_import_btn.clicked.connect(self._batchImportClicked)
 
     def validateEMGDataFile(self, file_path):
         if file_path is None or len(file_path.strip()) == 0:
@@ -745,82 +814,16 @@ class EMGAddWindow(QMainWindow):
         self.finished.emit((self.person, self.emg, self.kinematic))  # Emit close signal and pass results.
         self.close()
 
-    def _scanFolderClicked(self):
-        folder = QFileDialog.getExistingDirectory(
-            self, self.tr("Select participant folder"), self.root or ""
-        )
-        if not folder:
-            return
+    def _batchImportClicked(self):
+        """Hand off to MainWindow's multi-participant Batch Import workflow.
 
-        candidates = [
-            os.path.join(folder, f)
-            for f in os.listdir(folder)
-            if f.lower().endswith((".c3d", ".mat"))
-        ]
-        if not candidates:
-            QMessageBox.warning(
-                self,
-                self.tr("warning"),
-                self.tr("No .c3d or .mat files found in the selected folder."),
-                QMessageBox.Ok,
-            )
-            return
-
-        if len(candidates) == 1:
-            emg_file = candidates[0]
-            mvc_candidates = []
-        else:
-            emg_file, mvc_candidates = self._resolveFolderFiles(candidates)
-            if emg_file is None:
-                return
-
-        valid, err = self.validateEMGDataFile(emg_file)
-        if not valid:
-            QMessageBox.critical(self, self.tr("error"), err, QMessageBox.Ok)
-            return
-
-        try:
-            self.emg = emg(emg_file)
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                self.tr("error"),
-                self.tr("Selected emg file is invalid: {}".format(str(e))),
-                QMessageBox.Ok,
-            )
-            return
-
-        self.channels = [
-            c for c in self.emg.getAllChannels() if not _is_sync_channel(c)
-        ]
-        self.widgets.label_3.setText(emg_file)
-        self.applyFuzzMatchOnJoint()
-
-        if mvc_candidates:
-            valid_mvc, _ = self.validateBatchEMGDataFiles(mvc_candidates)
-            if valid_mvc:
-                self.mvcfiles = valid_mvc
-                self.applyFuzzMatchOnMVC()
-
-        self.updateChannelBox()
-
-    def _resolveFolderFiles(self, candidates):
-        """Ask user which file is the EMG file; the rest become MVC candidates."""
-        names = [os.path.basename(f) for f in candidates]
-        name, ok = QInputDialog.getItem(
-            self,
-            self.tr("Select EMG File"),
-            self.tr("Multiple files found. Select the main EMG file:"),
-            names,
-            0,
-            False,
-        )
-        if not ok:
-            return None, []
-        idx = names.index(name)
-        emg_file = candidates[idx]
-        mvc_candidates = [f for i, f in enumerate(candidates) if i != idx]
-        return emg_file, mvc_candidates
+        This wizard only knows how to add one participant at a time, so it
+        can't run the batch flow itself -- it just signals the request and
+        closes; MainWindow.addEMGButtonClick wires this to
+        batchImportButtonClicked().
+        """
+        self.batchImportRequested.emit()
+        self.close()
 
 
 class ConfigWindow(QDialog):
@@ -1402,6 +1405,23 @@ class MainWindow(QMainWindow):
         widgets.pushButton_27.clicked.connect(self.EMGSaveConfigurationButtonClicked)
         widgets.pushButton_12.clicked.connect(self.EMGBatchProcessButtonClicked)
         widgets.pushButton_12.setEnabled(False)
+        # "+" beside the existing "-" (pushButton_15) -- (re)adds a named
+        # saved EMG config, e.g. after accidentally deleting the entry a
+        # Batch Import created (Edit Config alone can't recreate the list
+        # entry if it's gone; this is a direct, explicit way to do it).
+        self._add_saved_config_btn = QPushButton()
+        self._add_saved_config_btn.setCursor(Qt.PointingHandCursor)
+        self._add_saved_config_btn.setStyleSheet(
+            "background-color:rgba(255,255,255,0.15);\n" "margin:3px 2px;"
+        )
+        _add_saved_config_icon = QIcon()
+        _add_saved_config_icon.addFile(
+            "images/icons/cil-plus.png", QSize(), QIcon.Normal, QIcon.Off
+        )
+        self._add_saved_config_btn.setIcon(_add_saved_config_icon)
+        self._add_saved_config_btn.clicked.connect(self._addSavedConfigButtonClicked)
+        widgets.horizontalLayout_30.insertWidget(0, self._add_saved_config_btn)
+
         widgets.pushButton_15.clicked.connect(self.removeEMGConfig)
         widgets.lineEdit_3.textChanged.connect(self.updateFilterText)
         widgets.checkBox_2.stateChanged.connect(self.EMGParticipantSelectAllClicked)
@@ -1463,12 +1483,23 @@ class MainWindow(QMainWindow):
         self.workspace = None
         self.home = None
         self.account = None
+        # Clear Designer's placeholder table content and disable the
+        # data-dependent controls (Signal Process / Select All) until a
+        # workspace with participants is loaded.
+        self.updateEMGParticipantBox()
 
         self.participant_filter = ""
         self.filesystemTree = (
             QFileSystemModel()
         )  # file system tree for workspace directory
         self.selectedParticipants = set()  # key of selected participants
+
+        # Remembers the BatchConfig used by the most recent Batch Import, so
+        # Edit Config / Edit Mapping act on "the same config file loaded
+        # along with the batch" instead of always starting blank.
+        self._current_batch_config = None
+        self._current_batch_config_path = None  # None if never saved to/loaded from a .toml
+        self._current_batch_config_name = None  # key in workspace.getEMGConfigures()
         self.singleEMG = (
             None,
             None,
@@ -1532,11 +1563,33 @@ class MainWindow(QMainWindow):
             "}"
             "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
         )
-        self._crop_group = QGroupBox("Analysis Segment")
+        self._crop_group = QGroupBox("")
         self._crop_group.setStyleSheet(_GRP_S)
         _cg_layout = QVBoxLayout(self._crop_group)
-        _cg_layout.setContentsMargins(8, 16, 8, 4)
+        _cg_layout.setContentsMargins(8, 8, 8, 4)
         _cg_layout.setSpacing(3)
+        _crop_header = QHBoxLayout()
+        _crop_header.setSpacing(4)
+        _crop_title_lbl = QLabel("Analysis Segment")
+        _crop_title_lbl.setStyleSheet("font-weight: bold; color: #c8c8c8; border: none;")
+        _crop_header.addWidget(_crop_title_lbl)
+        _crop_help_btn = QToolButton()
+        _crop_help_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarContextHelpButton)
+        )
+        _crop_help_btn.setIconSize(QSize(14, 14))
+        _crop_help_btn.setStyleSheet("QToolButton { border: none; background: transparent; }")
+        _crop_help_btn.setToolTip(
+            self.tr(
+                "Sets the valid time window for this participant's EMG analysis. "
+                "Original signal is unchanged; Clear reverts to the full trial.\n\n"
+                "Single-participant use only — for batch processing, segment via "
+                "the Kinematics Inspection module instead."
+            )
+        )
+        _crop_header.addWidget(_crop_help_btn)
+        _crop_header.addStretch()
+        _cg_layout.addLayout(_crop_header)
         _crop_row = QHBoxLayout()
         _crop_row.setSpacing(4)
         _lbl_start = QLabel("Start (s):")
@@ -1582,6 +1635,35 @@ class MainWindow(QMainWindow):
         )
         self._overview_btn.clicked.connect(self.showPipelineOverview)
         widgets.horizontalLayout_19.addWidget(self._overview_btn)
+
+        # Edit Config / Edit Mapping — inserted side by side right after
+        # BATCH PROCESS (pushButton_12), styled to match pushButton_10/11/12
+        # (no explicit stylesheet, so both inherit the app-wide
+        # "#pagesContainer QPushButton" rule from the theme .qss, same as
+        # LOAD EMG DATA / SIGNAL PROCESS / BATCH PROCESS).
+        # (Batch Import itself now lives in EMGAddWindow's wizard, replacing
+        # the old "Scan Folder..." button, since it's an alternative entry
+        # point into "Load EMG Data" rather than a separate top-level action.)
+        self._batch_edit_config_btn = QPushButton(self.tr("Edit Config…"))
+        self._batch_edit_config_btn.setCursor(Qt.PointingHandCursor)
+        self._batch_edit_config_btn.setMinimumHeight(56)
+        self._batch_edit_config_btn.setEnabled(False)
+        self._batch_edit_config_btn.clicked.connect(self.editBatchConfigButtonClicked)
+
+        self._batch_edit_mapping_btn = QPushButton(self.tr("Edit Mapping…"))
+        self._batch_edit_mapping_btn.setCursor(Qt.PointingHandCursor)
+        self._batch_edit_mapping_btn.setMinimumHeight(56)
+        self._batch_edit_mapping_btn.setEnabled(False)
+        self._batch_edit_mapping_btn.clicked.connect(self.editMappingButtonClicked)
+
+        # verticalLayout_35 holds only pushButton_10/11/12 (its own trailing
+        # spacer, verticalSpacer_9, actually belongs to the parent layout
+        # verticalLayout_75, not this one) — appending lands right after
+        # BATCH PROCESS as intended.
+        _batch_edit_row = QHBoxLayout()
+        _batch_edit_row.addWidget(self._batch_edit_config_btn)
+        _batch_edit_row.addWidget(self._batch_edit_mapping_btn)
+        widgets.verticalLayout_35.addLayout(_batch_edit_row)
 
         # self.test()
 
@@ -2005,6 +2087,7 @@ class MainWindow(QMainWindow):
         
         # Connect window close signal to slot.
         self.emg_add_window.finished.connect(self.on_emg_add_window_closed)
+        self.emg_add_window.batchImportRequested.connect(self.batchImportButtonClicked)
 
         # Show window.
         self.emg_add_window.run()  # No direct return needed; results are delivered via signal.
@@ -2945,6 +3028,35 @@ class MainWindow(QMainWindow):
                 logger.info("batch process: cancelled due to mixed sampling rates")
                 return
 
+        # Same config applies to every enabled channel identically (it is not
+        # channel-specific), so participants with different enabled-channel
+        # sets form a different cohort — warn before applying one config
+        # across a mixed cohort.
+        chan_map = {}
+        for p in listofpeople:
+            try:
+                enabled = frozenset(self.workspace[p].emg.enabledChannels)
+                chan_map.setdefault(enabled, []).append(p.name)
+            except Exception as e:
+                logger.error("batch process: failed to read channels for {}: {}".format(p.name, str(e)))
+
+        if len(chan_map) > 1:
+            lines = []
+            for chans, plist in chan_map.items():
+                chan_str = ", ".join(sorted(chans)) if chans else "(none)"
+                lines.append("[{}]: {}".format(chan_str, ", ".join(plist)))
+            reply = QMessageBox.warning(
+                None,
+                self.tr("warning"),
+                self.tr(
+                    "Selected participants have different enabled EMG channels:\n{}\n\nContinue batch processing?"
+                ).format("\n".join(lines)),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                logger.info("batch process: cancelled due to mismatched channel sets")
+                return
+
         # Confirm batch start — show config name, pipeline steps, participant list.
         # (EMGConfigWindow used the old Ui_EMGConfigWindow which is incompatible
         # with the new pipeline config structure, so we bypass it entirely.)
@@ -2991,6 +3103,483 @@ class MainWindow(QMainWindow):
         
         self.updateBatchProcessButtonState()
 
+    # ------------------------------------------------------------------
+    # Batch Import (TOML config + folder scan)
+    # ------------------------------------------------------------------
+
+    def batchImportButtonClicked(self):
+        if self.workspace is None:
+            QMessageBox.warning(
+                self, self.tr("warning"),
+                self.tr("No workspace is open.\nPlease create or load one first."),
+                QMessageBox.Ok,
+            )
+            return
+
+        # Lead with picking the config file itself: a native file-open dialog
+        # shows every .toml in a folder as you browse it (unlike a native
+        # folder-only picker, which can't show files at all), so this alone
+        # gives the "which configs are here" visual confirmation without any
+        # extra dialog. A batch config lives in its own batch root folder
+        # (same convention as Pose2Sim's Config.toml), so the root is just
+        # wherever the chosen config lives. Cancel -- no config yet -- falls
+        # back to picking the root folder and building one from scratch.
+        config_path, _ = QFileDialog.getOpenFileName(
+            self, self.tr("Select batch config (.toml) — Cancel to pick a folder and build one"),
+            self.home or "", "TOML Files (*.toml)",
+        )
+        if config_path:
+            root = os.path.dirname(config_path)
+            try:
+                cfg = load_batch_config(config_path)
+            except Exception as e:
+                QMessageBox.critical(
+                    self, self.tr("error"),
+                    self.tr("Failed to load config: {}").format(str(e)),
+                    QMessageBox.Ok,
+                )
+                return
+        else:
+            root = QFileDialog.getExistingDirectory(
+                self, self.tr("Select batch root folder"), self.home or ""
+            )
+            if not root:
+                return
+            dlg = BatchConfigDialog(BatchConfig(), self)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            cfg = dlg.get_config()
+            config_path = None
+
+        candidates = scan_batch_folder(root, cfg.layout)
+        ready = [c for c in candidates if c.status == "ready"]
+        not_ready = [c for c in candidates if c.status != "ready"]
+
+        if not ready:
+            QMessageBox.warning(
+                self, self.tr("Batch Import"),
+                self.tr("No usable participants found in this folder with the current config."),
+                QMessageBox.Ok,
+            )
+            return
+
+        # Same-cohort requirement: keep only the largest channel-signature
+        # group (mirrors the mismatched-channel warning EMGBatchProcessButtonClicked
+        # already applies to already-loaded participants).
+        groups = channel_signature_groups(ready)
+        cohort_sig = max(groups, key=lambda k: len(groups[k]))
+        in_cohort = [c for c in ready if frozenset(c.channels) == cohort_sig]
+        out_of_cohort = [c for c in ready if frozenset(c.channels) != cohort_sig]
+
+        already_loaded = [c for c in in_cohort if self.workspace.findParticipant(c.name) is not None]
+        already_loaded_names = {c.name for c in already_loaded}
+        in_cohort = [c for c in in_cohort if c.name not in already_loaded_names]
+
+        skip_lines = ["{}: {}".format(c.name, c.message) for c in not_ready]
+        skip_lines += [
+            "{}: different channel set than the majority cohort".format(c.name)
+            for c in out_of_cohort
+        ]
+        skip_lines += [
+            "{}: already in the workspace, skipped".format(c.name) for c in already_loaded
+        ]
+
+        if not in_cohort:
+            QMessageBox.warning(
+                self, self.tr("Batch Import"),
+                self.tr("No participants left to import:\n{}").format("\n".join(skip_lines)),
+                QMessageBox.Ok,
+            )
+            return
+
+        # Channel mapping: map-once (empty config) or confirm (already mapped).
+        if cfg.channel_mapping.is_empty():
+            sample = in_cohort[0]
+            map_dialog = QDialog(self)
+            map_dialog.setWindowTitle(
+                self.tr("Map Channels (applies to all {} participant(s))").format(len(in_cohort))
+            )
+            map_dialog.resize(750, 550)
+            v = QVBoxLayout(map_dialog)
+            panel = ChannelMappingPanel(
+                sample.channels, [os.path.basename(f) for f in sample.mvc_files],
+                self.workspace, parent=map_dialog,
+            )
+            v.addWidget(panel)
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.accepted.connect(map_dialog.accept)
+            buttons.rejected.connect(map_dialog.reject)
+            v.addWidget(buttons)
+            if map_dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            enabled, muscle, mvc_file, errors = panel.get_mapping()
+            if errors:
+                QMessageBox.critical(self, self.tr("error"), "\n".join(errors), QMessageBox.Ok)
+                return
+            cfg.channel_mapping = ChannelMapping(
+                enabled=list(enabled), muscle=muscle, mvc_file=mvc_file
+            )
+
+            if config_path:
+                reply = QMessageBox.question(
+                    self, self.tr("Save Mapping"),
+                    self.tr("Save this channel mapping back to the config file for next time?"),
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if reply == QMessageBox.Yes:
+                    try:
+                        save_batch_config(config_path, cfg)
+                    except Exception as e:
+                        QMessageBox.warning(
+                            self, self.tr("warning"),
+                            self.tr("Failed to save config: {}").format(str(e)),
+                            QMessageBox.Ok,
+                        )
+        else:
+            mapping_summary = "\n".join(
+                "  {} → {}".format(c, cfg.channel_mapping.muscle.get(c, "?"))
+                for c in cfg.channel_mapping.enabled
+            )
+            skip_summary = ("\n\nSkipped:\n" + "\n".join(skip_lines)) if skip_lines else ""
+            reply = QMessageBox.question(
+                self, self.tr("Confirm Batch Import"),
+                self.tr("Import {} participant(s) using this mapping?\n\n{}{}").format(
+                    len(in_cohort), mapping_summary, skip_summary
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        mapping = (
+            set(cfg.channel_mapping.enabled),
+            dict(cfg.channel_mapping.muscle),
+            dict(cfg.channel_mapping.mvc_file),
+        )
+
+        self._batch_import_progress = QProgressDialog(
+            self.tr("Importing participants..."), self.tr("Cancel"), 0, len(in_cohort), self
+        )
+        self._batch_import_progress.setWindowTitle(self.tr("Myotion-ing"))
+        self._batch_import_progress.setWindowModality(Qt.WindowModal)
+        self._batch_import_progress.setMinimumDuration(0)
+        self._batch_import_progress.setValue(0)
+
+        self._batch_import_worker = BatchImportWorker(self.workspace, in_cohort, mapping, self)
+        self._batch_import_worker.progress.connect(self._onBatchImportProgress)
+        self._batch_import_worker.error.connect(
+            lambda msg: logger.error("Batch import error: {}".format(msg))
+        )
+        self._batch_import_worker.finished.connect(
+            lambda people: self._onBatchImportFinished(people, cfg, config_path)
+        )
+        self._batch_import_progress.canceled.connect(
+            self._batch_import_worker.requestInterruption
+        )
+        self._batch_import_worker.start()
+
+    def _onBatchImportProgress(self, count, name):
+        self._batch_import_progress.setValue(count)
+        self._batch_import_progress.setLabelText(self.tr("Loading: {}").format(name))
+
+    def _uniqueSavedConfigName(self, base):
+        """Avoid clobbering an existing saved EMG config with the same name
+        (e.g. re-running Batch Import for the same task_type twice)."""
+        existing = self.workspace.getEMGConfigures()
+        if base not in existing:
+            return base
+        i = 2
+        while "{} ({})".format(base, i) in existing:
+            i += 1
+        return "{} ({})".format(base, i)
+
+    def _onBatchImportFinished(self, people, cfg, config_path=None):
+        self._batch_import_progress.setValue(self._batch_import_progress.maximum())
+        self._batch_import_progress.close()
+        self.updateWorkSpaceParticipantBox()
+        self.saveProjectButtonClick(show=False)
+
+        if not people:
+            self.updateEMGParticipantBox()
+            QMessageBox.warning(
+                self, self.tr("Batch Import"),
+                self.tr("No participants were imported."),
+                QMessageBox.Ok,
+            )
+            return
+
+        # Save the batch's processing config as a named, reusable EMG config
+        # (same store BATCH PROCESS already reads from) so re-running/tweaking
+        # processing later doesn't require repeating the whole import -- just
+        # select these participants and use BATCH PROCESS with this config.
+        emg_configure = processing_to_emg_configure(cfg.processing)
+        cfg_name = self._uniqueSavedConfigName(cfg.layout.task_type or "Batch Import")
+        self.workspace.saveEMGConfigureObject(cfg_name, emg_configure)
+        self.updateEMGSavedConfigureList()
+
+        # Remember this as "the config loaded along with the batch" so
+        # Edit Config / Edit Mapping act on it instead of starting blank.
+        self._current_batch_config = cfg
+        self._current_batch_config_path = config_path
+        self._current_batch_config_name = cfg_name
+        # Select it so BATCH PROCESS is enabled immediately, not just saved.
+        matches = widgets.listWidget_2.findItems(cfg_name, Qt.MatchExactly)
+        if matches:
+            widgets.listWidget_2.setCurrentItem(matches[0])
+
+        # Pre-select the just-imported participants so BATCH PROCESS is one
+        # click away regardless of the answer below.
+        self.selectedParticipants.update(p.name for p in people)
+        self.updateEMGParticipantBox()
+        self.updateBatchProcessButtonState()
+
+        reply = QMessageBox.question(
+            self, self.tr("Batch Import"),
+            self.tr(
+                "Imported {} participant(s) and saved their processing settings as "
+                "'{}'. Start EMG processing now?\n\n"
+                "(Or later: select these participants and use BATCH PROCESS with "
+                "the '{}' config.)"
+            ).format(len(people), cfg_name, cfg_name),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.startBatchEMGProcess(people, emg_configure)
+
+    def editBatchConfigButtonClicked(self):
+        # Edit the config loaded along with the current batch, if any --
+        # only fall back to a blank config when nothing's been imported yet.
+        dlg = BatchConfigDialog(self._current_batch_config or BatchConfig(), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        edited = dlg.get_config()
+
+        path = self._current_batch_config_path
+        if path:
+            reply = QMessageBox.question(
+                self, self.tr("Save Config"),
+                self.tr("Overwrite the batch config loaded with this batch?\n\n{}").format(path),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                path = None  # fall through to "Save As" below
+
+        if not path:
+            path, _ = QFileDialog.getSaveFileName(
+                self, self.tr("Save Batch Config"), self.home or "", "TOML Files (*.toml)"
+            )
+            if not path:
+                return
+            if not path.lower().endswith(".toml"):
+                path += ".toml"
+
+        try:
+            save_batch_config(path, edited)
+        except Exception as e:
+            QMessageBox.critical(
+                self, self.tr("error"),
+                self.tr("Failed to save config: {}").format(str(e)),
+                QMessageBox.Ok,
+            )
+            return
+
+        self._current_batch_config = edited
+        self._current_batch_config_path = path
+        # Keep the saved processing config (used by BATCH PROCESS) in sync,
+        # so re-processing afterward picks up the edit without re-importing.
+        if self._current_batch_config_name and self.workspace is not None:
+            self.workspace.saveEMGConfigureObject(
+                self._current_batch_config_name, processing_to_emg_configure(edited.processing)
+            )
+            self.updateEMGSavedConfigureList()
+
+        QMessageBox.information(
+            self, self.tr("Saved"), self.tr("Config saved to:\n{}").format(path), QMessageBox.Ok
+        )
+
+    def editMappingButtonClicked(self):
+        if len(self.selectedParticipants) == 0:
+            QMessageBox.critical(
+                None, self.tr("error"), self.tr("Please select participants first!"),
+                QMessageBox.Ok,
+            )
+            return
+
+        listofpeople = [self.workspace.findParticipant(n) for n in self.selectedParticipants]
+        listofpeople = [p for p in listofpeople if p is not None]
+        if not listofpeople:
+            return
+
+        chan_map = {}
+        for p in listofpeople:
+            chan_map.setdefault(frozenset(self.workspace[p].emg.Channels), []).append(p.name)
+        if len(chan_map) > 1:
+            lines = [
+                "[{}]: {}".format(", ".join(sorted(chans)), ", ".join(names))
+                for chans, names in chan_map.items()
+            ]
+            reply = QMessageBox.warning(
+                None, self.tr("warning"),
+                self.tr(
+                    "Selected participants have different channel sets:\n{}\n\nContinue anyway?"
+                ).format("\n".join(lines)),
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        def _resolve_raw_channel(e, current_name):
+            """Best-effort original (pre-rename) channel name for
+            current_name -- needed to (re)assign an MVC file after a channel
+            has already been renamed once. Prefers the batch config
+            remembered from this batch's import (authoritative for anything
+            loaded via Batch Import); falls back to this emg object's own
+            rename history (chanMap) for participants added another way."""
+            cfg = self._current_batch_config
+            if cfg is not None:
+                for raw, muscle_name in cfg.channel_mapping.muscle.items():
+                    if muscle_name == current_name:
+                        return raw
+            for old, new in e.chanMap.items():
+                if new == current_name:
+                    return old
+            return current_name
+
+        first_emg = self.workspace[listofpeople[0]].emg
+        channels = list(first_emg.Channels)
+        # Pre-fill from the current live state -- current channel names are
+        # already the "muscle" labels if this participant was mapped before
+        # (batch import or a prior Edit Mapping pass); channels never renamed
+        # show their raw name as an editable placeholder.
+        mvc_initial = {}
+        all_mvc_basenames = set()
+        for p in listofpeople:
+            for path in self.workspace[p].emg.mvcFilesMap.values():
+                all_mvc_basenames.add(os.path.basename(path))
+        if self._current_batch_config is not None:
+            all_mvc_basenames.update(self._current_batch_config.channel_mapping.mvc_file.values())
+        for c in channels:
+            raw = _resolve_raw_channel(first_emg, c)
+            path = first_emg.mvcFilesMap.get(c) or first_emg.mvcFilesMap.get(raw)
+            if path:
+                mvc_initial[c] = os.path.basename(path)
+            elif self._current_batch_config is not None:
+                basename = self._current_batch_config.channel_mapping.mvc_file.get(raw)
+                if basename:
+                    mvc_initial[c] = basename
+
+        initial = (
+            set(first_emg.enabledChannels),
+            {c: c for c in first_emg.Channels},
+            mvc_initial,
+        )
+
+        map_dialog = QDialog(self)
+        map_dialog.setWindowTitle(
+            self.tr("Edit Mapping ({} participant(s))").format(len(listofpeople))
+        )
+        map_dialog.resize(750, 550)
+        v = QVBoxLayout(map_dialog)
+        panel = ChannelMappingPanel(
+            channels, sorted(all_mvc_basenames), self.workspace, initial=initial, parent=map_dialog
+        )
+        v.addWidget(panel)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(map_dialog.accept)
+        buttons.rejected.connect(map_dialog.reject)
+        v.addWidget(buttons)
+        if map_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        enabled, muscle, mvc_file, errors = panel.get_mapping()
+        if errors:
+            QMessageBox.critical(self, self.tr("error"), "\n".join(errors), QMessageBox.Ok)
+            return
+
+        mvc_warnings = []
+        for p in listofpeople:
+            e = self.workspace[p].emg
+            for c in list(e.Channels):
+                if c in enabled:
+                    e.enableChannel(c)
+                elif c in e.enabledChannels:
+                    e.disableChannel(c)
+            for old, new in muscle.items():
+                if old != new and old in e.Channels:
+                    e.renameChannel(old, new)
+
+            # Apply MVC (re)assignment -- only possible using an MVC file
+            # already loaded for THIS participant (no disk re-scan here).
+            basename_to_path = {os.path.basename(f): f for f in e.mvcFilesMap.values()}
+            for c, basename in mvc_file.items():
+                target_name = muscle.get(c, c)
+                raw = _resolve_raw_channel(e, c)
+                mvc_path = basename_to_path.get(basename)
+                if mvc_path is None:
+                    mvc_warnings.append(
+                        "{}: MVC file '{}' isn't loaded for this participant".format(p.name, basename)
+                    )
+                    continue
+                try:
+                    reassign_mvc_file(e, target_name, raw, mvc_path)
+                except ValueError as ex:
+                    mvc_warnings.append("{}: {}".format(p.name, str(ex)))
+
+        # Keep this in sync with "the same config file loaded along with the
+        # batch" so a later Edit Config / re-import sees the same mapping.
+        if self._current_batch_config is not None:
+            new_enabled, new_muscle, new_mvc = [], {}, {}
+            for c in channels:
+                raw = _resolve_raw_channel(first_emg, c)
+                if c in enabled:
+                    new_enabled.append(raw)
+                if c in muscle:
+                    new_muscle[raw] = muscle[c]
+                if c in mvc_file:
+                    new_mvc[raw] = mvc_file[c]
+            self._current_batch_config.channel_mapping = ChannelMapping(
+                enabled=new_enabled, muscle=new_muscle, mvc_file=new_mvc
+            )
+            if self._current_batch_config_path:
+                reply = QMessageBox.question(
+                    self, self.tr("Save Mapping"),
+                    self.tr(
+                        "Overwrite the batch config's channel mapping with these changes?\n\n{}"
+                    ).format(self._current_batch_config_path),
+                    QMessageBox.Yes | QMessageBox.No,
+                )
+                if reply == QMessageBox.Yes:
+                    try:
+                        save_batch_config(self._current_batch_config_path, self._current_batch_config)
+                    except Exception as e:
+                        QMessageBox.warning(
+                            self, self.tr("warning"),
+                            self.tr("Failed to save config: {}").format(str(e)),
+                            QMessageBox.Ok,
+                        )
+
+        self.updateEMGParticipantBox()
+        self.saveProjectButtonClick(show=False)
+        if mvc_warnings:
+            QMessageBox.warning(
+                self, self.tr("Edit Mapping"),
+                self.tr("Some MVC assignments could not be applied:\n{}").format(
+                    "\n".join(mvc_warnings)
+                ),
+                QMessageBox.Ok,
+            )
+        QMessageBox.information(
+            self, self.tr("Edit Mapping"),
+            self.tr(
+                "Mapping updated for {} participant(s). Re-run BATCH PROCESS "
+                "to apply it to processing/reports."
+            ).format(len(listofpeople)),
+            QMessageBox.Ok,
+        )
 
     def FFTPlotClearAllClicked(self):
         widgets.scrollArea_3.deleteAllPages()
@@ -3303,11 +3892,23 @@ class MainWindow(QMainWindow):
 
     # UPDATE UI EVENTS/Slots
     # //////////////////////////////////////////////////////////////
+    def _updateEMGDataControlsEnabled(self):
+        """Enable Signal Process / Select All only once a workspace has participants.
+
+        Also guards EMGParticipantSelectAllClicked, which calls
+        self.workspace.getFilteredParticipants() unconditionally -- without
+        this, toggling Select All with no workspace loaded would crash.
+        """
+        has_data = self.workspace is not None and len(self.workspace.getParticipants()) > 0
+        widgets.pushButton_11.setEnabled(has_data)
+        widgets.checkBox_2.setEnabled(has_data)
+
     @Slot()
     def updateEMGParticipantBox(self):
         if self.workspace is None:
             widgets.tableWidget_2.clearContents()
             widgets.tableWidget_2.setRowCount(0)
+            self._updateEMGDataControlsEnabled()
             return
         participants = self.workspace.getFilteredParticipants(self.participant_filter)
         n = len(participants)
@@ -3342,6 +3943,7 @@ class MainWindow(QMainWindow):
 
         # Sync listWidget_3 state.
         self.syncListWidgetWithSelectedParticipants()
+        self._updateEMGDataControlsEnabled()
 
     def updateWorkSpaceParticipantBox(self):
         # listwidget_3
@@ -3597,6 +4199,46 @@ class MainWindow(QMainWindow):
 
         widgets.listWidget_2.itemSelectionChanged.connect(self.updateBatchProcessButtonState)
         widgets.listWidget_2.itemDoubleClicked.connect(self.onListWidget2ItemDoubleClicked)
+
+    def _addSavedConfigButtonClicked(self):
+        """(Re)add a named saved EMG config to the list -- the counterpart
+        to removeEMGConfig's "-" button. Prefers restoring the current
+        batch's config (the common "I deleted it by accident" case, since
+        Edit Config alone only edits self._current_batch_config in memory --
+        it can't recreate a deleted list entry unless you also save through
+        it); falls back to the existing single-EMG "Save Configuration"
+        action if no batch is currently tracked this session.
+        """
+        if self.workspace is None:
+            return
+
+        if self._current_batch_config is not None and self._current_batch_config_name:
+            self.workspace.saveEMGConfigureObject(
+                self._current_batch_config_name,
+                processing_to_emg_configure(self._current_batch_config.processing),
+            )
+            self.updateEMGSavedConfigureList()
+            matches = widgets.listWidget_2.findItems(
+                self._current_batch_config_name, Qt.MatchExactly
+            )
+            if matches:
+                widgets.listWidget_2.setCurrentItem(matches[0])
+            self.saveWorkSpace()
+            return
+
+        if self.singleEMG[0] is not None:
+            self.EMGSaveConfigurationButtonClicked()
+            return
+
+        QMessageBox.information(
+            self, self.tr("Add Configuration"),
+            self.tr(
+                "Nothing to add yet -- run Batch Import, or open a single "
+                "participant's EMG signal processing and use Save "
+                "Configuration there, then use + here."
+            ),
+            QMessageBox.Ok,
+        )
 
     def removeEMGConfig(self):
         """Delete the selected saved config from the list and the workspace."""
@@ -4561,6 +5203,7 @@ class MainWindow(QMainWindow):
         self._batch_progress = QProgressDialog(
             self.tr("Processing participants..."), self.tr("Cancel"), 0, n, self
         )
+        self._batch_progress.setWindowTitle(self.tr("Myotion-ing"))
         self._batch_progress.setWindowModality(Qt.WindowModal)
         self._batch_progress.setMinimumDuration(0)
         self._batch_progress.setValue(0)
@@ -4704,6 +5347,8 @@ class MainWindow(QMainWindow):
         
         # Set button enabled state.
         widgets.pushButton_12.setEnabled(list_selected_count == 1 and table_selected_count > 1)
+        self._batch_edit_config_btn.setEnabled(table_selected_count >= 1)
+        self._batch_edit_mapping_btn.setEnabled(table_selected_count >= 1)
 
 
 # setting up Url Scheme string before app starts

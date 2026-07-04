@@ -6384,91 +6384,6 @@ QTableWidget::item:selected
                                      <attribute name="verticalHeaderStretchLastSection">
                                       <bool>true</bool>
                                      </attribute>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                      <property name="font">
-                                       <font>
-                                        <family>Segoe UI</family>
-                                       </font>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
-                                     <row>
-                                      <property name="text">
-                                       <string>New Row</string>
-                                      </property>
-                                     </row>
                                      <column>
                                       <property name="text">
                                        <string>Selected</string>
@@ -6489,21 +6404,6 @@ QTableWidget::item:selected
                                        <string>Report</string>
                                       </property>
                                      </column>
-                                     <item row="0" column="1">
-                                      <property name="text">
-                                       <string>David Lee</string>
-                                      </property>
-                                     </item>
-                                     <item row="0" column="2">
-                                      <property name="text">
-                                       <string>Yes</string>
-                                      </property>
-                                     </item>
-                                     <item row="0" column="3">
-                                      <property name="text">
-                                       <string>Yes</string>
-                                      </property>
-                                     </item>
                                     </widget>
                                    </item>
                                   </layout>

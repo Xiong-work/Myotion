@@ -254,6 +254,13 @@ class workspace:
         )
         return 0
 
+    def saveEMGConfigureObject(self, cfgname, configure):
+        """Like saveEMGConfigure, but for a standalone emgConfigure that
+        isn't attached to any participant yet (e.g. a batch-import config
+        built from a .toml, before any processing has run)."""
+        self.saved_emgconfig[cfgname] = configure.copy()
+        return 0
+
     def getEMGConfigures(self):
         return self.saved_emgconfig
 

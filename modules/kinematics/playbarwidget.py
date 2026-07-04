@@ -224,6 +224,8 @@ class PlayBarWidget(QWidget):
     eventMarkRequested    = Signal()
     exportEventsRequested = Signal()
     onsetDetectionToggled = Signal(bool)
+    cycleDetectionToggled = Signal(bool)
+    manualCyclesRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -311,6 +313,44 @@ class PlayBarWidget(QWidget):
             lambda checked: self.onsetDetectionToggled.emit(checked)
         )
 
+        # ── Task-type cycle detection ───────────────────────────────────────
+        self.taskTypeCombo = QComboBox()
+        self.taskTypeCombo.addItems([
+            self.tr("Gait"),
+            self.tr("Running"),
+            self.tr("Sit-to-Stand"),
+            self.tr("Squat"),
+            self.tr("Trunk Flexion/Extension"),
+            self.tr("Lifting"),
+            self.tr("Pointing"),
+        ])
+        self.taskTypeCombo.setStyleSheet(_stepStyle)
+        self.taskTypeCombo.setToolTip(self.tr("Functional task type"))
+
+        self.sourceMarkerCombo = QComboBox()
+        self.sourceMarkerCombo.setStyleSheet(_stepStyle)
+        self.sourceMarkerCombo.setToolTip(self.tr("Kinematics source marker for cycle detection"))
+        self.sourceMarkerCombo.setMinimumWidth(110)
+
+        self.detectCyclesButton = QPushButton(self.tr("Detect Cycles"))
+        self.detectCyclesButton.setCheckable(True)
+        self.detectCyclesButton.setChecked(False)
+        self.detectCyclesButton.setStyleSheet(buttonStyle)
+        self.detectCyclesButton.setToolTip(self.tr("Detect repetition cycles from the selected marker"))
+        self.detectCyclesButton.clicked.connect(
+            lambda checked: self.cycleDetectionToggled.emit(checked)
+        )
+
+        # Manual cycle entry — always enabled, unlike Detect Cycles which
+        # needs kinematics + a marker. Covers EMG-only trials where the user
+        # has external notes for the rep boundaries and no marker to detect from.
+        self.manualCyclesButton = QPushButton(self.tr("Manual Cycles…"))
+        self.manualCyclesButton.setStyleSheet(buttonStyle)
+        self.manualCyclesButton.setToolTip(
+            self.tr("Type in repetition boundaries by hand (works without kinematics)")
+        )
+        self.manualCyclesButton.clicked.connect(self.manualCyclesRequested)
+
         hbox.addWidget(self.prevFrameButton)
         hbox.addWidget(self.playbutton)
         hbox.addWidget(self.nextFrameButton)
@@ -321,6 +361,10 @@ class PlayBarWidget(QWidget):
         hbox.addWidget(self.markEventButton)
         hbox.addWidget(self.exportEventsButton)
         hbox.addWidget(self.onsetDetectionButton)
+        hbox.addWidget(self.taskTypeCombo)
+        hbox.addWidget(self.sourceMarkerCombo)
+        hbox.addWidget(self.detectCyclesButton)
+        hbox.addWidget(self.manualCyclesButton)
 
         vbox.addWidget(self.slider)
         vbox.addWidget(ctrl)
@@ -334,6 +378,19 @@ class PlayBarWidget(QWidget):
     def enable_playback(self):
         """Enable all playback controls — call once kinematics data is loaded."""
         self._set_controls_enabled(True)
+
+    def set_marker_options(self, labels):
+        """Populate the kinematics-source marker combo. Call once per participant load."""
+        self.sourceMarkerCombo.blockSignals(True)
+        self.sourceMarkerCombo.clear()
+        self.sourceMarkerCombo.addItems(list(labels))
+        self.sourceMarkerCombo.blockSignals(False)
+
+    def current_task_type(self):
+        return self.taskTypeCombo.currentText()
+
+    def current_source_marker(self):
+        return self.sourceMarkerCombo.currentText()
 
     # ── Internal helpers ──────────────────────────────────────────────────
 
