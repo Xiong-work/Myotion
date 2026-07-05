@@ -1365,7 +1365,7 @@ class MainWindow(QMainWindow):
         # Menu bar
         widgets.fileMenu.clicked.connect(self.fileMenuClick)
         widgets.displayMenu.clicked.connect(self.displayMenuClick)
-        widgets.toolsMenu.clicked.connect(self.underDevelopmentClick)
+        widgets.toolsMenu.clicked.connect(self.openPlaygroundDialog)
         widgets.settingsMenu.clicked.connect(self.configButtonClick)
         widgets.helpMenu.clicked.connect(self.showAboutDialog)
 
@@ -1375,7 +1375,7 @@ class MainWindow(QMainWindow):
 
         # Quick Start buttons on the start page.
         widgets.pushButton_2.clicked.connect(self.underDevelopmentClick)
-        widgets.pushButton_3.clicked.connect(self.underDevelopmentClick)
+        widgets.pushButton_3.clicked.connect(self.openPlaygroundDialog)
         widgets.pushButton_4.clicked.connect(self.underDevelopmentClick)
 
         # EMG Page
@@ -2231,6 +2231,9 @@ class MainWindow(QMainWindow):
 
     def showAboutDialog(self):
         AboutDialog.show_about(self)
+
+    def openPlaygroundDialog(self):
+        PlaygroundDialog(self).exec()
 
     def applyTheme(self, mode: str):
         """Load the QSS theme file then re-apply modern widget palette for contrast."""

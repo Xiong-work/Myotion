@@ -22,6 +22,15 @@ class Base(QOpenGLWidget):
     def initializeGL(self) -> None:
         self.lastTime = time.time()
 
+    def resizeGL(self, w, h) -> None:
+        # Qt already resizes the default framebuffer/viewport to match the
+        # widget; what it can't know is the camera's projection aspect ratio,
+        # which stays stale after initializeGL unless updated here -- without
+        # this, a non-uniform resize (e.g. only widening the panel) visibly
+        # stretches/squashes the whole scene instead of just showing more of it.
+        if hasattr(self, "camera"):
+            self.camera.setAspectRatio(w / max(1, h))
+
     def paintGL(self) -> None:
         self.deltaTime = time.time() - self.lastTime
         self.time += self.deltaTime

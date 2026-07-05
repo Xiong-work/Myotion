@@ -96,6 +96,7 @@ dependencies:
   - zstd=1.5.5=h12be248_0
   - pip:
       - c3d==0.5.2
+      - ezc3d==1.7.0
       - pyside6==6.5.3
       - pyside6-addons==6.5.3
       - pyside6-essentials==6.5.3
