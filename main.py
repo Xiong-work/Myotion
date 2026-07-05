@@ -23,7 +23,7 @@ import webbrowser
 import argparse
 import numpy as np
 
-from PySide6.QtCore import Qt, Signal, Slot, QTranslator, QSignalBlocker, QThread, QSize
+from PySide6.QtCore import Qt, Signal, Slot, QTranslator, QSignalBlocker, QThread, QSize, QSettings
 from PySide6.QtGui import QIcon, QPalette, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -761,32 +761,76 @@ class EMGAddWindow(QMainWindow):
         self.close()
 
 
+_SETTINGS_ORG = "AccMov"
+_SETTINGS_APP = "Myotion"
+# (code, display name) -- add more languages here as .qm translations are added.
+_LANGUAGES = [
+    ("en", "English"),
+    ("cn", "中文"),
+]
+
+
 class ConfigWindow(QDialog):
+    """Preferences dialog. Just a language selector for now -- add more rows
+    here as more app-wide preferences are needed."""
+
     def __init__(self, width, height, parent=None):
         QDialog.__init__(self, parent)
-        self.ui = Ui_Configuration()
-        self.ui.setupUi(self)
-
-        self.resize(width, height)
-        self.setMinimumSize(640, 480)
-        self.setWindowTitle("Configuration")
-        self.setWindowFlag(Qt.WindowMaximizeButtonHint)
+        self.setWindowTitle(self.tr("Preferences"))
+        self.setStyleSheet("background-color:#2c3039; color:#f4f4f4;")
+        self.resize(min(width, 420), min(height, 220))
+        self.setMinimumSize(360, 180)
         self.setSizeGripEnabled(True)
 
-        self.widgets = self.ui
         self.person = None
         self.emg = None
         self.kinematic = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(14)
+
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel(self.tr("Language")))
+        self._lang_combo = QComboBox()
+        for code, label in _LANGUAGES:
+            self._lang_combo.addItem(label, code)
+        settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
+        current_lang = settings.value("language", "en")
+        idx = self._lang_combo.findData(current_lang)
+        if idx >= 0:
+            self._lang_combo.setCurrentIndex(idx)
+        lang_row.addWidget(self._lang_combo, 1)
+        layout.addLayout(lang_row)
+
+        layout.addStretch()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(self.tr("Confirm"))
+        buttons.accepted.connect(self.confirmBtnClicked)
+        buttons.rejected.connect(self.cancelBtnClicked)
+        layout.addWidget(buttons)
 
     def run(self):
         self.exec()
         return self.person, self.emg, self.kinematic
 
     def confirmBtnClicked(self):
-        return
+        settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
+        old_lang = settings.value("language", "en")
+        new_lang = self._lang_combo.currentData()
+        settings.setValue("language", new_lang)
+        if new_lang != old_lang:
+            QMessageBox.information(
+                self, self.tr("Language Changed"),
+                self.tr("Restart Myotion for the new language to take effect."),
+            )
+        self.accept()
 
     def cancelBtnClicked(self):
-        self.close()
+        self.reject()
 
 
 class EMGConfigWindow(QDialog):
@@ -1198,6 +1242,8 @@ class MainWindow(QMainWindow):
         # SET UI DEFINITIONS
         # ///////////////////////////////////////////////////////////////
         UIFunctions.uiDefinitions(self)
+        self._theme_mode = "dark"  # matches the QSS loaded at startup
+        widgets.displayMenu.setText(self.tr("Light Mode"))
         self.applyModernWidgetStyle()
         self._setup_kinematics_splitters()
         self._setup_emg_splitters()
@@ -1321,7 +1367,11 @@ class MainWindow(QMainWindow):
         widgets.displayMenu.clicked.connect(self.displayMenuClick)
         widgets.toolsMenu.clicked.connect(self.underDevelopmentClick)
         widgets.settingsMenu.clicked.connect(self.configButtonClick)
-        widgets.helpMenu.clicked.connect(self.underDevelopmentClick)
+        widgets.helpMenu.clicked.connect(self.showAboutDialog)
+
+        # Right settings panel (opened via settingsTopBtn) -- Profile is a
+        # placeholder until a real user-account system exists.
+        widgets.btn_print.clicked.connect(self.underDevelopmentClick)
 
         # Quick Start buttons on the start page.
         widgets.pushButton_2.clicked.connect(self.underDevelopmentClick)
@@ -2174,12 +2224,13 @@ class MainWindow(QMainWindow):
         menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def displayMenuClick(self):
-        """Drop-down under the Display menu button for theme selection."""
-        menu = QMenu(self)
-        menu.addAction(self.tr("Dark Theme"),  lambda: self.applyTheme("dark"))
-        menu.addAction(self.tr("Light Theme"), lambda: self.applyTheme("light"))
-        btn = widgets.displayMenu
-        menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+        """Display menu button: toggles directly between dark/light -- only
+        two states exist, so a dropdown menu is an unneeded extra click."""
+        next_mode = "light" if self._theme_mode == "dark" else "dark"
+        self.applyTheme(next_mode)
+
+    def showAboutDialog(self):
+        AboutDialog.show_about(self)
 
     def applyTheme(self, mode: str):
         """Load the QSS theme file then re-apply modern widget palette for contrast."""
@@ -2197,6 +2248,11 @@ class MainWindow(QMainWindow):
             self.ui.styleSheet.setStyleSheet(qss)
             self.applyModernWidgetStyle(mode)
             self._applyThemeWidgetOverrides(mode)
+            self._theme_mode = mode
+            # Label names the mode a click switches *into* (not the current one).
+            widgets.displayMenu.setText(
+                self.tr("Light Mode") if mode == "dark" else self.tr("Dark Mode")
+            )
         except Exception as e:
             QMessageBox.warning(self, self.tr("Theme Error"),
                                 self.tr(f"Could not load theme: {e}"))
@@ -5717,10 +5773,11 @@ if __name__ == "__main__":
     splash.start()
     qApp.processEvents()  # paint the splash before the (synchronous) UI build below
 
-    # get language, default en
+    # get language: --lang overrides, otherwise use the saved Preferences
+    # choice, defaulting to en if nothing has been saved yet.
     language = args.lang
-    if language == None:
-        language = "en"
+    if language is None:
+        language = QSettings(_SETTINGS_ORG, _SETTINGS_APP).value("language", "en")
 
     # translator
     if language == "cn":

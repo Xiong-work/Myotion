@@ -83,7 +83,8 @@ class MyotionSplashScreen(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setFixedSize(340, 340)
-        self.setStyleSheet("background-color: #ffffff;")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background-color: transparent;")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

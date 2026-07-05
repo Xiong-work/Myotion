@@ -1,6 +1,9 @@
 class Settings:
     # APP SETTINGS
     # ///////////////////////////////////////////////////////////////
+    # Keep in sync with setup.iss's MyAppVersion -- this is the only
+    # in-app copy, shown in the About dialog.
+    APP_VERSION = "1.0.0"
     ENABLE_CUSTOM_TITLE_BAR = True
     MENU_WIDTH = 240
     LEFT_BOX_WIDTH = 240

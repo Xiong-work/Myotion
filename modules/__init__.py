@@ -19,7 +19,6 @@ from PySide6.QtWidgets import *
 # GUI FILE
 from .ui_main import Ui_MainWindow
 from .emg_import import Ui_EMGImport
-from .ui_configuration import Ui_Configuration
 from .ui_emg_config import Ui_EMGConfigWindow
 
 # APP SETTINGS
