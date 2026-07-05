@@ -32,25 +32,16 @@ _BODY_COLORS = [
 _MARKER_COLOR = [1.0, 0.3, 0.3]
 _HIGHLIGHT_COLOR = [1.0, 0.85, 0.0]
 
-# Bundled fallback Geometry libraries (standard OpenSim body meshes) used
-# when a model's own folder doesn't ship a "Geometry" directory alongside it
-# -- lets most models load with no folder-picker prompt at all. Different
-# OpenSim model families name the same body part's mesh file differently
-# (confirmed: e.g. "l_pelvis.vtp" vs "pelvis_lv.vtp" across these three real
-# sources), and a same-named file is NOT necessarily the same mesh across
-# sources -- so these are kept as separate, self-contained libraries rather
-# than merged into one folder (which would silently let one source's file
-# clobber another's under a shared name). _on_load tries each in turn and
-# keeps whichever resolves the most mesh references for the loaded model.
-_BUNDLED_GEOMETRY_ROOT = os.path.join(
+# Bundled fallback Geometry library (standard OpenSim body meshes, merged
+# from several real projects' Geometry folders -- see myotion_resources/
+# opensim_geometry/) used when a model's own folder doesn't ship a
+# "Geometry" directory alongside it -- lets most models load with no
+# folder-picker prompt at all. Missing/unusual meshes still show up as
+# per-body warnings after loading, same as an explicitly-picked folder.
+_BUNDLED_GEOMETRY_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "myotion_resources", "opensim_geometry",
 )
-_BUNDLED_GEOMETRY_DIRS = [
-    ("Zhou Xin", os.path.join(_BUNDLED_GEOMETRY_ROOT, "zhou_xin")),
-    ("FBLS", os.path.join(_BUNDLED_GEOMETRY_ROOT, "fbls")),
-    ("Pose2Sim/Soccer", os.path.join(_BUNDLED_GEOMETRY_ROOT, "pose2sim_soccer")),
-]
 
 
 def _aabb_corners(triangles):
@@ -128,57 +119,27 @@ class OpenSimViewerDialog(QDialog):
 
         default_geometry = os.path.join(os.path.dirname(osim_path), "Geometry")
         if os.path.isdir(default_geometry):
-            # A Geometry folder shipped alongside the model is always the
-            # right one -- no need to compare it against the bundled libraries.
-            candidates = [("model folder", default_geometry)]
+            geometry_dir = default_geometry
+        elif os.path.isdir(_BUNDLED_GEOMETRY_DIR):
+            geometry_dir = _BUNDLED_GEOMETRY_DIR
         else:
-            candidates = [(label, path) for label, path in _BUNDLED_GEOMETRY_DIRS if os.path.isdir(path)]
-
-        # Different model families name the same body part's mesh file
-        # differently (and a same-named file across libraries is not
-        # necessarily the same mesh -- see _BUNDLED_GEOMETRY_DIRS), so try
-        # each bundled library independently and keep whichever resolves the
-        # most mesh references, rather than ever mixing files from two
-        # libraries for one model.
-        model, geometry_source, load_error = None, None, None
-        for label, path in candidates:
-            try:
-                candidate_model = load_model(osim_path, geometry_dir=path)
-            except OpenSimModelError as e:
-                load_error = e
-                break  # structural error -- same for every geometry_dir, no point retrying
-            except Exception as e:
-                load_error = e
-                break
-            if model is None or candidate_model.missing_mesh_count < model.missing_mesh_count:
-                model, geometry_source = candidate_model, label
-
-        if load_error is not None:
-            QMessageBox.warning(self, self.tr("Load Failed"), str(load_error))
-            return
-
-        if model is None:
-            # No local Geometry folder and no usable bundled library --
-            # fall back to asking the user, same as before.
             geometry_dir = QFileDialog.getExistingDirectory(
                 self, self.tr("Select Geometry Folder (mesh files for this model)"),
             )
             if not geometry_dir:
                 return
-            try:
-                model = load_model(osim_path, geometry_dir=geometry_dir)
-            except OpenSimModelError as e:
-                QMessageBox.warning(self, self.tr("Load Failed"), str(e))
-                return
-            except Exception as e:
-                QMessageBox.warning(self, self.tr("Load Failed"), self.tr(f"Could not load model: {e}"))
-                return
-            geometry_source = "selected folder"
+
+        try:
+            model = load_model(osim_path, geometry_dir=geometry_dir)
+        except OpenSimModelError as e:
+            QMessageBox.warning(self, self.tr("Load Failed"), str(e))
+            return
+        except Exception as e:
+            QMessageBox.warning(self, self.tr("Load Failed"), self.tr(f"Could not load model: {e}"))
+            return
 
         self._model = model
-        self._file_label.setText(
-            f"{model.name} ({os.path.basename(osim_path)}) -- geometry: {geometry_source}"
-        )
+        self._file_label.setText(f"{model.name} ({os.path.basename(osim_path)})")
         self._status_label.setText(self.tr("Nothing selected"))
 
         self._gl_view.clearItems()
