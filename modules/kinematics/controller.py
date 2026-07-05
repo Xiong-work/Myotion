@@ -88,6 +88,7 @@ class Controller:
         self.playbar.manualCyclesRequested.connect(self._onManualCyclesRequested)
         self.playbar.taskTypeChanged.connect(self._onTaskTypeChanged)
         self.playbar.cycleMarkersVisibilityToggled.connect(self.top.set_cycle_markers_visible)
+        self.playbar.clearPlotRequested.connect(self._onClearPlotRequested)
 
         # Cache the last-selected EMG channel so the onset button can act without re-click
         self._current_emg_channel = None
@@ -164,6 +165,7 @@ class Controller:
             (self.playbar.manualCyclesRequested, self._onManualCyclesRequested),
             (self.playbar.taskTypeChanged, self._onTaskTypeChanged),
             (self.playbar.cycleMarkersVisibilityToggled, self.top.set_cycle_markers_visible),
+            (self.playbar.clearPlotRequested, self._onClearPlotRequested),
             (self.playbar.axisFilterCombo.currentTextChanged, self._onAxisFilterChanged),
             (self.labeltree.itemDoubleClicked, self.tree_item_select),
             (self.labeltree.customContextMenuRequested, self._on_tree_context_menu),
@@ -225,15 +227,30 @@ class Controller:
         self.top.update(self.frame)
         # self.bottom.notify(self.frame)
 
+    # Human-readable labels for the overlay-mismatch warning.
+    _OVERLAY_KIND_LABELS = {
+        "marker": "Marker", "angle": "Angle",
+        "emg": "EMG", "force_plate": "Force Plate",
+    }
+
     def tree_item_select(self, index):
         # skip if its a parent item
         if index.parent() == None:
             return
         self._last_tree_item = index
-        self.top.clear()
+        overlay = self.playbar.is_overlay_enabled()
+        if not overlay:
+            self.top.clear()
         name = index.text(0)
         do_filter = self.playbar.filterCheck.isChecked()
+        new_widget = False
         if self.model.has_kinematics and name in self.model.kinematic.data.data:
+            # Keep the Cycle Detection source picker in sync with whatever
+            # the user is already looking at here.
+            category = "angle" if name in self.model.kinematic.anglelabels else "marker"
+            if overlay and not self.top.can_overlay(category):
+                self._warn_overlay_mismatch(category)
+                return
             d = self.model.kinematic.data[name]
             xs, ys, zs = [], [], []
             for p in d:
@@ -255,22 +272,25 @@ class Controller:
             for suffix, data in (("x", xs), ("y", ys), ("z", zs)):
                 if axis_filter != "All" and axis_filter.lower() != suffix:
                     continue
-                self.top.add_line(
-                    np.arange(0, len(data)), data, name + "." + suffix, type="marker"
+                created = self.top.add_line(
+                    np.arange(0, len(data)), data, name + "." + suffix, type="marker",
+                    overlay=overlay, kind=category,
                 )
+                new_widget = new_widget or created
 
-            # Keep the Cycle Detection source picker in sync with whatever
-            # the user is already looking at here.
-            category = "angle" if name in self.model.kinematic.anglelabels else "marker"
             self.playbar.set_current_source(category, name, axis_filter)
         if name in self.model.emg.Channels:
+            if overlay and not self.top.can_overlay("emg"):
+                self._warn_overlay_mismatch("emg")
+                return
             # Replay the user's pipeline (DC offset, filters, rectification) on the
             # full raw signal — no crop, no normalization — matching Time Domain analysis.
             y_arr = self.model.emg.get_kinematics_display(name)
             fs_emg = self.model.emg.getfs()
             x = list(np.arange(len(y_arr)) / fs_emg)
             rate = self.model.kinematic_frame_rate()
-            self.top.add_line(x, list(y_arr), name, 'channel', rate)
+            created = self.top.add_line(x, list(y_arr), name, 'channel', rate, overlay=overlay, kind="emg")
+            new_widget = new_widget or created
             # Cache for onset detection button
             self._current_emg_channel = name
             self._current_emg_arr = y_arr
@@ -280,17 +300,46 @@ class Controller:
                 self._run_onset_detection(name, y_arr, fs_emg)
         # Force plate channel click — plot the selected component over time
         if name in self._force_channels:
+            if overlay and not self.top.can_overlay("force_plate"):
+                self._warn_overlay_mismatch("force_plate")
+                return
             fp, attr = self._force_channels[name]
             data = np.asarray(getattr(fp, attr), dtype=float)
             if do_filter:
                 data = self._apply_filter(data, fp.fs, cutoff_hz=10.0, order=4)
             x_time = list(np.arange(len(data)) / fp.fs)
             point_fs = self.model.kinematic_frame_rate()
-            self.top.add_line(x_time, list(data), name, "channel", point_fs)
+            created = self.top.add_line(
+                x_time, list(data), name, "channel", point_fs, overlay=overlay, kind="force_plate"
+            )
+            new_widget = new_widget or created
             self.playbar.set_current_source("force_plate", "Plate {}".format(fp.plate_id), attr)
-        # Re-draw events on the freshly populated plots
-        for ev in self.model.events:
-            self.top.add_event(ev)
+        # Re-draw events, but only on subplots that were just created --
+        # an overlay trace layered onto an existing subplot already has its
+        # events drawn, and re-running this would duplicate them.
+        if new_widget:
+            for ev in self.model.events:
+                self.top.add_event(ev)
+
+    def _warn_overlay_mismatch(self, attempted_kind):
+        """Overlay is on but *attempted_kind* doesn't match what's already
+        on the shared overlay subplot -- e.g. EMG (mV) onto a Marker (mm)
+        overlay. Mixing units on one Y axis would be misleading, so refuse
+        and tell the user to clear first instead of silently skipping."""
+        current = self._OVERLAY_KIND_LABELS.get(self.top.overlay_kind, self.top.overlay_kind)
+        attempted = self._OVERLAY_KIND_LABELS.get(attempted_kind, attempted_kind)
+        QMessageBox.warning(
+            None,
+            self.labeltree.tr("Overlay"),
+            self.labeltree.tr(
+                "Can't overlay {attempted} data on top of {current} data — "
+                "different units can't share one plot.\n\n"
+                "Click \"Clear Plot\" to start a new overlay, or turn Overlay off."
+            ).format(attempted=attempted, current=current),
+        )
+
+    def _onClearPlotRequested(self):
+        self.top.clear()
 
     def _onAxisFilterChanged(self, _text):
         """Re-plot the currently-shown Signals item so switching the Axis

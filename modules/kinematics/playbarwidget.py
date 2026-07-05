@@ -231,6 +231,7 @@ class PlayBarWidget(QWidget):
     manualCyclesRequested = Signal()
     taskTypeChanged       = Signal(str)
     cycleMarkersVisibilityToggled = Signal(bool)
+    clearPlotRequested    = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -312,6 +313,25 @@ class PlayBarWidget(QWidget):
         self.axisFilterCombo.setToolTip(
             self.tr("Which axis to plot for Markers/Angles (Signals panel)")
         )
+
+        # Layer newly-selected signals on top of the current plot (same kind
+        # only -- see Controller.tree_item_select / PlayPlotWidget.can_overlay)
+        # instead of replacing it.
+        self.overlayCheck = QPushButton(self.tr("Overlay"))
+        self.overlayCheck.setCheckable(True)
+        self.overlayCheck.setChecked(False)
+        self.overlayCheck.setStyleSheet(buttonStyle)
+        self.overlayCheck.setToolTip(
+            self.tr(
+                "Layer newly selected signals on top of the current plot "
+                "(same kind only) instead of replacing it"
+            )
+        )
+
+        self.clearPlotButton = QPushButton(self.tr("Clear Plot"))
+        self.clearPlotButton.setStyleSheet(buttonStyle)
+        self.clearPlotButton.setToolTip(self.tr("Clear all traces from the signal plot"))
+        self.clearPlotButton.clicked.connect(self.clearPlotRequested)
 
         self.markEventButton = QPushButton(self.tr("Mark Event"))
         self.markEventButton.setStyleSheet(buttonStyle)
@@ -450,6 +470,8 @@ class PlayBarWidget(QWidget):
         hbox.addStretch()
         hbox.addWidget(self.filterCheck)
         hbox.addWidget(self.axisFilterCombo)
+        hbox.addWidget(self.overlayCheck)
+        hbox.addWidget(self.clearPlotButton)
         hbox.addWidget(self.markEventButton)
         hbox.addWidget(self.exportEventsButton)
         hbox.addWidget(self.onsetDetectionButton)
@@ -535,6 +557,11 @@ class PlayBarWidget(QWidget):
 
     def current_task_type(self):
         return self.taskTypeCombo.currentText()
+
+    def is_overlay_enabled(self):
+        """True if newly-plotted signals should be layered on the current
+        plot (same kind only) instead of replacing it."""
+        return self.overlayCheck.isChecked()
 
     def current_axis_filter(self):
         """Return "All"/"X"/"Y"/"Z" -- which axis to plot for a Marker/Angle
