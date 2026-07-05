@@ -44,7 +44,6 @@ python main.py
 Myotion/
 ├── main.py                  # Application entry point
 ├── rserver.py               # Embedded R Shiny server manager
-├── configuration.ui         # Qt Designer: configuration dialog
 ├── emg_config.ui            # Qt Designer: EMG config dialog
 ├── emg_import.ui            # Qt Designer: EMG import dialog
 ├── main.ui / login.ui       # Qt Designer: main window / login

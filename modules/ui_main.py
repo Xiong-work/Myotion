@@ -1482,7 +1482,7 @@ class Ui_MainWindow(object):
         self.pushButton_2.setStyleSheet("font-size:11px;")
         icon6 = QIcon()
         icon6.addFile(
-            ":/icons/images/icons/cil-library.png", QSize(), QIcon.Normal, QIcon.Off
+            "images/icons/cil-footprints.png", QSize(), QIcon.Normal, QIcon.Off
         )
         self.pushButton_2.setIcon(icon6)
 
@@ -4442,7 +4442,7 @@ class Ui_MainWindow(object):
         self.btn_print.setCursor(QCursor(Qt.PointingHandCursor))
         self.btn_print.setLayoutDirection(Qt.LeftToRight)
         self.btn_print.setStyleSheet(
-            "background-image: url(:/icons/images/icons/cil-print.png);"
+            "background-image: url(:/icons/images/icons/cil-user.png);"
         )
 
         self.verticalLayout_14.addWidget(self.btn_print)
@@ -4593,7 +4593,7 @@ class Ui_MainWindow(object):
         self.settingsMenu.setText(
             QCoreApplication.translate("MainWindow", "Settings", None)
         )
-        self.helpMenu.setText(QCoreApplication.translate("MainWindow", "Help", None))
+        self.helpMenu.setText(QCoreApplication.translate("MainWindow", "About", None))
         # if QT_CONFIG(tooltip)
         self.settingsTopBtn.setToolTip(
             QCoreApplication.translate("MainWindow", "Settings", None)
@@ -4625,8 +4625,8 @@ class Ui_MainWindow(object):
         self.signUpButton.setText(QCoreApplication.translate("MainWindow", u"Sign Up", None))
         # self.logoutButton.setText(QCoreApplication.translate("MainWindow", u"Log Out", None))
         self.label_5.setText(QCoreApplication.translate("MainWindow", u"Quick Start", None))
-        self.pushButton_2.setText(QCoreApplication.translate("MainWindow", u"  Batch processing", None))
-        self.pushButton_3.setText(QCoreApplication.translate("MainWindow", u" Data visualization", None))
+        self.pushButton_2.setText(QCoreApplication.translate("MainWindow", u"  Gait Analysis", None))
+        self.pushButton_3.setText(QCoreApplication.translate("MainWindow", u" Playground", None))
         self.pushButton_4.setText(QCoreApplication.translate("MainWindow", u" Tutorial ", None))
         self.label_6.setText(QCoreApplication.translate("MainWindow", u"How to use Myotion ...", None))
         self.plainTextEdit_2.setPlainText(QCoreApplication.translate("MainWindow", u"Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.", None))
@@ -5044,7 +5044,7 @@ class Ui_MainWindow(object):
         self.btn_message.setText(
             QCoreApplication.translate("MainWindow", "Message", None)
         )
-        self.btn_print.setText(QCoreApplication.translate("MainWindow", "Print", None))
+        self.btn_print.setText(QCoreApplication.translate("MainWindow", "Profile", None))
         self.btn_logout.setText(
             QCoreApplication.translate("MainWindow", "Logout", None)
         )
