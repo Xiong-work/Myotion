@@ -21,3 +21,4 @@ from .batch_config_dialog import BatchConfigDialog
 from .exit_confirm_dialog import ExitConfirmDialog
 from .splash_screen import MyotionSplashScreen
 from .about_dialog import AboutDialog
+from .playground_dialog import PlaygroundDialog

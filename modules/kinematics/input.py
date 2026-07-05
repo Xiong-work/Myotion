@@ -20,6 +20,11 @@ class Input:
         self.mouseLocation = MouseEvent(0, 0)
         self.mouseDrageLocation = MouseEvent(0, 0)
         self.mousePressed = False
+        # Middle-button state, tracked the same way as the left button --
+        # used for MovementRig's screen-plane pan (hold middle button, drag).
+        self.middleLocation = MouseEvent(0, 0)
+        self.middleDragLocation = MouseEvent(0, 0)
+        self.middlePressed = False
         self.wheelMovement = 0
 
         self.mouseEventList = []
@@ -47,6 +52,8 @@ class Input:
         self.keyEvents.append(KeyEvent(key, type))
 
     def isMouseDown(self, key):
+        if key == Qt.MouseButton.MiddleButton:
+            return self.middlePressed
         return self.mousePressed
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -54,9 +61,14 @@ class Input:
             self.mouseLocation = MouseEvent(event.x(), event.y())
             self.mouseDrageLocation = MouseEvent(event.x(), event.y())
             self.mousePressed = True
+        elif event.button() == Qt.MouseButton.MiddleButton:
+            self.middleLocation = MouseEvent(event.x(), event.y())
+            self.middleDragLocation = MouseEvent(event.x(), event.y())
+            self.middlePressed = True
 
     def mouseMoveEvent(self, event):
         self.mouseDrageLocation = MouseEvent(event.x(), event.y())
+        self.middleDragLocation = MouseEvent(event.x(), event.y())
 
     def mouseMovement(self):
         x, y = (
@@ -66,8 +78,19 @@ class Input:
         self.mouseLocation = self.mouseDrageLocation
         return x, y
 
+    def middleMovement(self):
+        x, y = (
+            self.middleLocation.x - self.middleDragLocation.x,
+            self.middleLocation.y - self.middleDragLocation.y,
+        )
+        self.middleLocation = self.middleDragLocation
+        return x, y
+
     def mouseReleaseEvent(self, event):
-        self.mousePressed = False
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.mousePressed = False
+        elif event.button() == Qt.MouseButton.MiddleButton:
+            self.middlePressed = False
 
     def wheelEvent(self, event):
         self.wheelMovement = -event.angleDelta().y()

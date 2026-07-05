@@ -65,6 +65,15 @@ class MovementRig:
             self.camera.rotateY(x * rotateAmount)
             self.camera.rotateX(y * rotateAmount)
 
+        # Hold the middle mouse button and drag to pan the view in its own
+        # screen plane (translate up/down/left-right without rotating) --
+        # the standard "middle-drag to pan" convention, complementing
+        # left-drag-to-orbit and wheel-to-dolly.
+        if inputObejct.isMouseDown(Qt.MouseButton.MiddleButton):
+            x, y = inputObejct.middleMovement()
+            panAmount = self.unitsPerSecond * 0.5
+            self.camera.pan(x * panAmount, -y * panAmount)
+
         if inputObejct.wheelMovement != 0:
             self.camera.translate(0, 0, inputObejct.wheelMovement)
             inputObejct.wheelMovement = 0
