@@ -28,6 +28,13 @@ _PICK_CROSSHAIR_PEN = pg.mkPen(color="#00b8d4", width=1, style=Qt.PenStyle.DashL
 _AXIS_PEN  = pg.mkPen(color="#b0b8c8", width=1)
 _TEXT_PEN  = pg.mkPen(color="#444444")
 
+# Cycling palette for overlay mode — each additional same-kind trace layered
+# onto the shared overlay subplot gets the next color, wrapping around.
+_OVERLAY_COLORS = [
+    "#586cdb", "#e07b39", "#2ecc71", "#e63946",
+    "#9b59b6", "#17a2b8", "#f1c40f", "#8d6e63",
+]
+
 # Minimum pixel height for each subplot row
 _MIN_ROW_H = 160
 
@@ -121,6 +128,14 @@ class PlayPlotWidget(QWidget):
         self._pick_cancel_callback = None  # called on a right-click cancel
         self._pick_crosshairs = []    # (widget, InfiniteLine) -- one per subplot, follows the mouse
         self._pick_markers = []       # [[(widget, InfiniteLine), …], …] -- persisted picked points
+        # Overlay mode: newly added traces of the same "kind" (marker/angle/
+        # emg/force_plate — see Controller.tree_item_select) are layered onto
+        # this one shared subplot in a new color instead of each getting its
+        # own row. None when no overlay subplot exists yet (or after clear()).
+        self._overlay_widget = None
+        self._overlay_kind = None
+        self._overlay_color_idx = 0
+        self._overlay_items = {}      # trace name -> PlotDataItem, for replacing a re-plotted name
         # Trial-wide kinematic frame rate -- the one fixed quantity needed to
         # convert a TrialEvent's time_s (always seconds) into each subplot's
         # own x-axis units (frames for "marker" plots, seconds for
@@ -135,15 +150,66 @@ class PlayPlotWidget(QWidget):
         markers land on the right x position regardless of subplot type."""
         self._kinematic_fps = float(fps) if fps else 1.0
 
-    def add_line(self, x, y, name, type="emg", rate=1):
+    def can_overlay(self, kind):
+        """True if a trace of *kind* may be layered onto the current overlay
+        subplot -- either there isn't one yet, or it already holds that same
+        kind. False means the caller should warn instead of calling
+        add_line(overlay=True, ...) for it (mixing e.g. EMG onto a marker
+        overlay would put mV and mm on one Y axis)."""
+        return self._overlay_widget is None or self._overlay_kind == kind
+
+    @property
+    def overlay_kind(self):
+        """The kind currently held by the overlay subplot, or None."""
+        return self._overlay_kind
+
+    def add_line(self, x, y, name, type="emg", rate=1, overlay=False, kind=None):
+        """Add a trace. If overlay=True and can_overlay(kind) held true when
+        the caller checked, the trace is layered onto the shared overlay
+        subplot in the next palette color (replacing any existing trace of
+        the same *name*) instead of creating a new subplot row.
+
+        Returns True if a brand-new subplot widget was created, False if the
+        trace was layered onto an already-existing overlay widget. The
+        caller uses this to know whether event markers need (re)drawing on
+        it -- an existing overlay widget already has them.
+        """
         if self.placeholder.isVisible():
             self.lo.removeWidget(self.placeholder)
             self.placeholder.hide()
 
-        x_label = "Frame" if type == "marker" else "Time (s)"
-        plt = _make_plot(name, x_label)
+        if overlay and self._overlay_widget is not None and self._overlay_kind == kind:
+            old_item = self._overlay_items.pop(name, None)
+            if old_item is not None:
+                try:
+                    self._overlay_widget.removeItem(old_item)
+                except Exception:
+                    pass
+            pen = pg.mkPen(color=_OVERLAY_COLORS[self._overlay_color_idx % len(_OVERLAY_COLORS)], width=1.5)
+            self._overlay_color_idx += 1
+            item = self._overlay_widget.plot(x, y, pen=pen, name=name, autoDownsample=False)
+            self._overlay_items[name] = item
+            return False
 
-        plt.plot(x, y, pen=_TRACE_PEN, autoDownsample=False)
+        x_label = "Frame" if type == "marker" else "Time (s)"
+        # Overlay subplot holds several differently-named traces at once --
+        # a title fixed to the first trace's name would be misleading once
+        # more are layered on, so use a generic one and rely on the legend
+        # (added below) to label each trace.
+        plt = _make_plot("Overlay" if overlay else name, x_label)
+
+        if overlay:
+            plt.addLegend(offset=(10, 10))
+            self._overlay_widget = plt
+            self._overlay_kind = kind
+            self._overlay_color_idx = 0
+            self._overlay_items = {}
+            pen = pg.mkPen(color=_OVERLAY_COLORS[0], width=1.5)
+            self._overlay_color_idx = 1
+            item = plt.plot(x, y, pen=pen, name=name, autoDownsample=False)
+            self._overlay_items[name] = item
+        else:
+            plt.plot(x, y, pen=_TRACE_PEN, autoDownsample=False)
         plt.setXRange(0, max(x) if len(x) and max(x) > 0 else 1)
 
         cursor = plt.addLine(x=0, pen=_CURSOR_PEN)
@@ -158,6 +224,7 @@ class PlayPlotWidget(QWidget):
             em["items"].append((plt, line))
 
         self.lo.addWidget(plt)
+        return True
 
     def _event_x(self, time_s, rate):
         """Convert a TrialEvent's time_s (always seconds) to this subplot's
@@ -370,5 +437,9 @@ class PlayPlotWidget(QWidget):
         self._plot_refs.clear()
         self._event_markers.clear()
         self._onset_markers.clear()
+        self._overlay_widget = None
+        self._overlay_kind = None
+        self._overlay_color_idx = 0
+        self._overlay_items = {}
         self.lo.addWidget(self.placeholder)
         self.placeholder.show()
