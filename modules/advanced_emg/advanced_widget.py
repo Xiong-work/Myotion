@@ -31,10 +31,11 @@ from modules.pyMotion.core.batch_io import load_external_folder, load_external_g
 from modules.pyMotion.core.batch_dataset import BatchDataset, subset_cycles
 from modules.pyMotion.core.synergy import (
     prepare_synergy_input, extract_synergies, classify_kmeans, group_synergy_summary,
-    within_group_cossim, cross_group_cossim, similarity_summary, spm_compare,
-    within_group_cossim_curves, cross_group_cossim_curves, spm_compare_curves,
+    within_group_cossim, cross_group_cossim, similarity_summary, spm_compare, spm_compare_curves,
 )
-from modules.pyMotion.core.wavelet_analysis import prepare_wavelet_input, wavelet_medfreq_curve
+from modules.pyMotion.core.wavelet_analysis import (
+    prepare_wavelet_input, wavelet_medfreq_curve, wavelet_scalogram, cone_of_influence,
+)
 from modules.pyMotion.core.timeSeriesTable import timeSeriesTable
 from .chart_view import AdvancedChartView
 
@@ -89,8 +90,7 @@ class AdvancedAnalysisWidget(QWidget):
         self._wavelet_results = {}     # trial_name -> instantaneous-median-frequency curve (np.ndarray)
         self._wavelet_channel = None   # muscle channel the current _wavelet_results was computed for
         self._wavelet_n_points = None  # points/cycle used for the last wavelet run
-        self._wavelet_compare_result = None  # SimilarityMatrix or SPMResult, from "Compare Groups"
-        self._wavelet_compare_kind = None    # "cossim" or "spm", disambiguates the above
+        self._wavelet_compare_result = None  # SPMResult from "Compare Groups" (always cross-group SPM)
         self._wavelet_compare_title = ""     # human-readable description of what _wavelet_compare_result compares
         # User-editable plot appearance; empty title/xlabel/ylabel fall back to
         # the analysis-computed defaults. Applied to whichever chart is current.
@@ -647,6 +647,30 @@ class AdvancedAnalysisWidget(QWidget):
         self._build_synergy_settings_dialog()
         self._update_synergy_summary()
 
+        vl.addSpacing(6)
+        line = QLabel()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background:#44475a;")
+        vl.addWidget(line)
+
+        next_steps = self._lbl(
+            "What next?\n\n"
+            "1. Click Run Analysis (below) with \"Classify synergies across "
+            "participants\" enabled in Synergy Settings.\n\n"
+            "2. Once classified, switch the Analysis dropdown (above) to "
+            "Cosine Similarity (Synergy) to check how consistent a given "
+            "synergy (e.g. Syn1) is within one group, or between two "
+            "groups.\n\n"
+            "3. Switch to Statistical Parametric Mapping (SPM) to test "
+            "whether two groups' activation patterns for a synergy differ "
+            "significantly at any point across the cycle.\n\n"
+            "Both need this step run first -- they compare the classified "
+            "synergies it produces.",
+            size=10, color="#6272a4",
+        )
+        next_steps.setWordWrap(True)
+        vl.addWidget(next_steps)
+
         vl.addStretch()
         return page
 
@@ -952,11 +976,14 @@ class AdvancedAnalysisWidget(QWidget):
         """Params for Wavelet Analysis -- a per-trial, per-cycle
         instantaneous median-frequency curve (Continuous Wavelet Transform,
         Morlet) for one muscle channel, plus a self-contained "Compare
-        Groups" section (cosine similarity or SPM) so this analysis doesn't
-        need Muscle Synergy's classification step -- a muscle channel's
-        identity is already stable across trials/groups, unlike a synergy
-        label, so within/cross-group comparison works directly on the
-        per-trial curves via synergy.py's *_curves() helpers."""
+        Groups" section (SPM only -- see spm_compare_curves) so this
+        analysis doesn't need Muscle Synergy's classification step. Cosine
+        similarity is deliberately not offered here: it measures whether
+        two curves point the same "direction", which is the right question
+        for a synergy's muscle-weighting vector but not for a frequency
+        curve, where the physiologically meaningful question is "how many
+        Hz apart are these" -- exactly what SPM answers, point-by-point
+        along the cycle with the correction its RFT threshold provides."""
         page = QWidget()
         vl = QVBoxLayout(page)
         vl.setContentsMargins(0, 6, 0, 6)
@@ -999,37 +1026,39 @@ class AdvancedAnalysisWidget(QWidget):
         note.setWordWrap(True)
         vl.addWidget(note)
 
+        self._btn_wavelet_settings = QPushButton("Wavelet Settings...")
+        self._style_button(self._btn_wavelet_settings)
+        self._btn_wavelet_settings.clicked.connect(self._open_wavelet_settings_dialog)
+        vl.addWidget(self._btn_wavelet_settings)
+
+        self._wavelet_summary_label = self._lbl("", size=10, color="#6272a4")
+        self._wavelet_summary_label.setWordWrap(True)
+        vl.addWidget(self._wavelet_summary_label)
+
+        self._build_wavelet_settings_dialog()
+        self._update_wavelet_summary()
+
+        self._wavelet_scalogram_check = QCheckBox("Show scalogram (selected participant)")
+        self._wavelet_scalogram_check.setStyleSheet("color:#f8f8f2;font-size:12px;")
+        self._wavelet_scalogram_check.stateChanged.connect(self._update_chart)
+        vl.addWidget(self._wavelet_scalogram_check)
+
         vl.addSpacing(6)
         line = QLabel()
         line.setFixedHeight(1)
         line.setStyleSheet("background:#44475a;")
         vl.addWidget(line)
 
-        vl.addWidget(self._lbl("Compare Groups", bold=True))
+        vl.addWidget(self._lbl("Compare Groups (SPM)", bold=True))
         vl.addWidget(self._lbl("Group A", size=11, color="#6272a4"))
         self._wavelet_group_a_combo = QComboBox()
         self._style_combo(self._wavelet_group_a_combo)
         vl.addWidget(self._wavelet_group_a_combo)
 
-        self._wavelet_cross_check = QCheckBox("Compare across two groups")
-        self._wavelet_cross_check.setStyleSheet("color:#f8f8f2;font-size:12px;")
-        self._wavelet_cross_check.stateChanged.connect(self._on_wavelet_cross_toggled)
-        vl.addWidget(self._wavelet_cross_check)
-
-        self._wavelet_group_b_label = self._lbl("Group B", size=11, color="#6272a4")
-        vl.addWidget(self._wavelet_group_b_label)
+        vl.addWidget(self._lbl("Group B", size=11, color="#6272a4"))
         self._wavelet_group_b_combo = QComboBox()
         self._style_combo(self._wavelet_group_b_combo)
         vl.addWidget(self._wavelet_group_b_combo)
-        self._wavelet_group_b_label.setVisible(False)
-        self._wavelet_group_b_combo.setVisible(False)
-
-        vl.addWidget(self._lbl("Method", size=11, color="#6272a4"))
-        self._wavelet_method_combo = QComboBox()
-        self._wavelet_method_combo.addItems(["Cosine Similarity", "SPM"])
-        self._style_combo(self._wavelet_method_combo)
-        self._wavelet_method_combo.currentIndexChanged.connect(self._on_wavelet_method_changed)
-        vl.addWidget(self._wavelet_method_combo)
 
         self._btn_wavelet_compare = QPushButton("Compare Groups")
         self._style_button(self._btn_wavelet_compare)
@@ -1038,7 +1067,8 @@ class AdvancedAnalysisWidget(QWidget):
 
         compare_note = self._lbl(
             "Requires Wavelet Analysis to have been run first (Run "
-            "Analysis, above) -- SPM always needs two groups.",
+            "Analysis, above). Two-sample SPM{t} comparing Group A's and "
+            "Group B's median-frequency curves.",
             size=10, color="#6272a4",
         )
         compare_note.setWordWrap(True)
@@ -1047,19 +1077,173 @@ class AdvancedAnalysisWidget(QWidget):
         vl.addStretch()
         return page
 
-    def _on_wavelet_cross_toggled(self, _state):
-        show = self._wavelet_cross_check.isChecked()
-        self._wavelet_group_b_label.setVisible(show)
-        self._wavelet_group_b_combo.setVisible(show)
+    def _build_wavelet_settings_dialog(self):
+        """Mother wavelet family + its parameters, plus the number of
+        analysis frequencies -- in their own popup, same rationale as
+        Synergy Settings: these are the "don't need to touch them, but can"
+        knobs, kept out of the main page so it stays readable. Complex
+        Morlet is the default and by far the most standard choice for this
+        kind of time-resolved EMG frequency analysis; the other two are
+        offered for anyone who wants to compare, not because they're
+        typically better."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Wavelet Settings")
+        dlg.setModal(False)
+        dlg.setStyleSheet("background:#282a36;")
+        vl = QVBoxLayout(dlg)
+        vl.setContentsMargins(12, 12, 12, 12)
+        vl.setSpacing(6)
 
-    def _on_wavelet_method_changed(self, _idx):
-        # SPM always compares two groups -- comparing a group to itself
-        # isn't a meaningful hypothesis test, so force+lock the checkbox
-        # rather than let the user hit an avoidable error at Compare time.
-        is_spm = self._wavelet_method_combo.currentText() == "SPM"
-        if is_spm:
-            self._wavelet_cross_check.setChecked(True)
-        self._wavelet_cross_check.setEnabled(not is_spm)
+        vl.addWidget(self._lbl("Mother wavelet", size=11, color="#6272a4"))
+        self._wavelet_family_combo = QComboBox()
+        self._wavelet_family_combo.addItems([
+            "Complex Morlet (recommended)",
+            "Complex Gaussian",
+            "Shannon",
+        ])
+        self._style_combo(self._wavelet_family_combo)
+        self._wavelet_family_combo.currentIndexChanged.connect(self._on_wavelet_family_changed)
+        vl.addWidget(self._wavelet_family_combo)
+
+        self._wavelet_family_stack = QStackedWidget()
+        self._wavelet_family_stack.addWidget(self._build_wavelet_morlet_page())
+        self._wavelet_family_stack.addWidget(self._build_wavelet_cgau_page())
+        self._wavelet_family_stack.addWidget(self._build_wavelet_shan_page())
+        vl.addWidget(self._wavelet_family_stack)
+
+        family_note = self._lbl(
+            "All three are complex-valued wavelets (needed to get a clean "
+            "power/amplitude estimate at each time+frequency point -- real "
+            "wavelets oscillate in sign and don't separate cleanly). "
+            "Complex Morlet trades bandwidth vs. center frequency; a wider "
+            "bandwidth (B) smooths across nearby frequencies (better "
+            "frequency resolution, worse time resolution) and a higher "
+            "center frequency (C) shifts which scale maps to which Hz -- "
+            "the defaults (1.5, 1.0) work well for typical EMG bands.",
+            size=10, color="#6272a4",
+        )
+        family_note.setWordWrap(True)
+        vl.addWidget(family_note)
+
+        vl.addSpacing(4)
+        vl.addWidget(self._lbl("Analysis frequencies (log-spaced)", size=11, color="#6272a4"))
+        self._wavelet_nfreqs_spin = QSpinBox()
+        self._wavelet_nfreqs_spin.setRange(10, 200)
+        self._wavelet_nfreqs_spin.setValue(40)
+        self._wavelet_nfreqs_spin.valueChanged.connect(self._update_wavelet_summary)
+        vl.addWidget(self._wavelet_nfreqs_spin)
+
+        nfreqs_note = self._lbl(
+            "More points give a smoother frequency estimate but take "
+            "longer to compute -- 40 is a reasonable default; increase it "
+            "mainly if the scalogram view looks too coarse/blocky.",
+            size=10, color="#6272a4",
+        )
+        nfreqs_note.setWordWrap(True)
+        vl.addWidget(nfreqs_note)
+        vl.addStretch()
+
+        btn_close = QPushButton("Close")
+        self._style_button(btn_close)
+        btn_close.clicked.connect(dlg.hide)
+        vl.addWidget(btn_close)
+
+        dlg.setMinimumWidth(260)
+        self._wavelet_settings_dialog = dlg
+
+    def _build_wavelet_morlet_page(self):
+        page = QWidget()
+        vl = QVBoxLayout(page)
+        vl.setContentsMargins(0, 4, 0, 4)
+        vl.setSpacing(4)
+        row = QHBoxLayout()
+        col_b = QVBoxLayout()
+        col_b.addWidget(self._lbl("Bandwidth (B)", size=10, color="#6272a4"))
+        self._wavelet_morlet_b_spin = QDoubleSpinBox()
+        self._wavelet_morlet_b_spin.setRange(0.1, 10.0)
+        self._wavelet_morlet_b_spin.setSingleStep(0.1)
+        self._wavelet_morlet_b_spin.setValue(1.5)
+        self._wavelet_morlet_b_spin.valueChanged.connect(self._update_wavelet_summary)
+        col_b.addWidget(self._wavelet_morlet_b_spin)
+        row.addLayout(col_b)
+        col_c = QVBoxLayout()
+        col_c.addWidget(self._lbl("Center freq (C)", size=10, color="#6272a4"))
+        self._wavelet_morlet_c_spin = QDoubleSpinBox()
+        self._wavelet_morlet_c_spin.setRange(0.1, 10.0)
+        self._wavelet_morlet_c_spin.setSingleStep(0.1)
+        self._wavelet_morlet_c_spin.setValue(1.0)
+        self._wavelet_morlet_c_spin.valueChanged.connect(self._update_wavelet_summary)
+        col_c.addWidget(self._wavelet_morlet_c_spin)
+        row.addLayout(col_c)
+        vl.addLayout(row)
+        return page
+
+    def _build_wavelet_cgau_page(self):
+        page = QWidget()
+        vl = QVBoxLayout(page)
+        vl.setContentsMargins(0, 4, 0, 4)
+        vl.setSpacing(4)
+        vl.addWidget(self._lbl("Order (1-8)", size=10, color="#6272a4"))
+        self._wavelet_cgau_order_spin = QSpinBox()
+        self._wavelet_cgau_order_spin.setRange(1, 8)
+        self._wavelet_cgau_order_spin.setValue(4)
+        self._wavelet_cgau_order_spin.valueChanged.connect(self._update_wavelet_summary)
+        vl.addWidget(self._wavelet_cgau_order_spin)
+        return page
+
+    def _build_wavelet_shan_page(self):
+        page = QWidget()
+        vl = QVBoxLayout(page)
+        vl.setContentsMargins(0, 4, 0, 4)
+        vl.setSpacing(4)
+        row = QHBoxLayout()
+        col_b = QVBoxLayout()
+        col_b.addWidget(self._lbl("Bandwidth (B)", size=10, color="#6272a4"))
+        self._wavelet_shan_b_spin = QDoubleSpinBox()
+        self._wavelet_shan_b_spin.setRange(0.1, 10.0)
+        self._wavelet_shan_b_spin.setSingleStep(0.1)
+        self._wavelet_shan_b_spin.setValue(1.0)
+        self._wavelet_shan_b_spin.valueChanged.connect(self._update_wavelet_summary)
+        col_b.addWidget(self._wavelet_shan_b_spin)
+        row.addLayout(col_b)
+        col_c = QVBoxLayout()
+        col_c.addWidget(self._lbl("Center freq (C)", size=10, color="#6272a4"))
+        self._wavelet_shan_c_spin = QDoubleSpinBox()
+        self._wavelet_shan_c_spin.setRange(0.1, 10.0)
+        self._wavelet_shan_c_spin.setSingleStep(0.1)
+        self._wavelet_shan_c_spin.setValue(1.5)
+        self._wavelet_shan_c_spin.valueChanged.connect(self._update_wavelet_summary)
+        col_c.addWidget(self._wavelet_shan_c_spin)
+        row.addLayout(col_c)
+        vl.addLayout(row)
+        return page
+
+    def _open_wavelet_settings_dialog(self):
+        self._wavelet_settings_dialog.show()
+        self._wavelet_settings_dialog.raise_()
+        self._wavelet_settings_dialog.activateWindow()
+
+    def _on_wavelet_family_changed(self, idx):
+        self._wavelet_family_stack.setCurrentIndex(idx)
+        self._update_wavelet_summary()
+
+    def _wavelet_string(self):
+        """Builds the pywt continuous-wavelet name string (e.g. "cmor1.5-1.0")
+        from the current Wavelet Settings selection."""
+        family = self._wavelet_family_combo.currentIndex()
+        if family == 0:
+            return f"cmor{self._wavelet_morlet_b_spin.value()}-{self._wavelet_morlet_c_spin.value()}"
+        elif family == 1:
+            return f"cgau{self._wavelet_cgau_order_spin.value()}"
+        else:
+            return f"shan{self._wavelet_shan_b_spin.value()}-{self._wavelet_shan_c_spin.value()}"
+
+    def _update_wavelet_summary(self, *_args):
+        family_name = self._wavelet_family_combo.currentText().split(" (")[0]
+        self._wavelet_summary_label.setText(
+            f"Wavelet: {family_name} ({self._wavelet_string()})  |  "
+            f"Frequencies: {self._wavelet_nfreqs_spin.value()}"
+        )
 
     def _refresh_wavelet_group_combos(self):
         groups = self._dataset.group_names if self._dataset else []
@@ -1314,7 +1498,6 @@ class AdvancedAnalysisWidget(QWidget):
         self._wavelet_channel = None
         self._wavelet_n_points = None
         self._wavelet_compare_result = None
-        self._wavelet_compare_kind = None
         self._wavelet_compare_title = ""
 
         self._refresh_groups_list()
@@ -1763,18 +1946,20 @@ class AdvancedAnalysisWidget(QWidget):
             QMessageBox.information(self, "Wavelet Analysis", "Freq low must be less than Freq high.")
             return
         n_points = self._wavelet_npoints_spin.value()
+        n_freqs = self._wavelet_nfreqs_spin.value()
+        wavelet = self._wavelet_string()
 
         self._status_label.setText("Running wavelet analysis (this can take a while)...")
         QApplication.processEvents()
 
         self._wavelet_results.clear()
         self._wavelet_compare_result = None
-        self._wavelet_compare_kind = None
         try:
             for trial in self._dataset:
                 prepared = self._get_wavelet_prepared_subset(trial, freq_low, freq_high)
                 curve = wavelet_medfreq_curve(
                     prepared, channel, n_points=n_points, freq_low=freq_low, freq_high=freq_high,
+                    n_freqs=n_freqs, wavelet=wavelet,
                 )
                 self._wavelet_results[trial.name] = curve
                 self._status_label.setText(f"Wavelet analysis: {trial.name} done.")
@@ -1806,82 +1991,45 @@ class AdvancedAnalysisWidget(QWidget):
         self._result_table.resizeColumnsToContents()
 
     def _run_wavelet_compare(self):
+        """Two-sample SPM{t} comparing Group A's and Group B's
+        median-frequency curves (see synergy.py's spm_compare_curves) --
+        Wavelet's compare step is SPM-only; see _build_wavelet_params_page's
+        docstring for why cosine similarity isn't offered here."""
         if not self._wavelet_results:
             QMessageBox.information(self, "Compare Groups", "Run Wavelet Analysis first.")
             return
 
         group_a = self._wavelet_group_a_combo.currentText()
-        if not group_a:
-            QMessageBox.information(self, "Compare Groups", "Choose Group A.")
+        group_b = self._wavelet_group_b_combo.currentText()
+        if not group_a or not group_b:
+            QMessageBox.information(self, "Compare Groups", "Choose Group A and Group B.")
             return
+
         curves_a = self._wavelet_curves_for_group(group_a)
-        if len(curves_a) < 2:
+        curves_b = self._wavelet_curves_for_group(group_b)
+        if len(curves_a) < 2 or len(curves_b) < 2:
             QMessageBox.information(
                 self, "Compare Groups",
-                f"Group '{group_a}' needs at least 2 trials with wavelet results.",
+                "Both groups need at least 2 trials with wavelet results "
+                f"(got {len(curves_a)} in '{group_a}', {len(curves_b)} in '{group_b}').",
             )
             return
 
-        method = self._wavelet_method_combo.currentText()
-        cross = self._wavelet_cross_check.isChecked()
-
-        self._status_label.setText("Computing group comparison...")
+        self._status_label.setText("Computing group comparison (SPM)...")
         QApplication.processEvents()
         try:
-            if cross:
-                group_b = self._wavelet_group_b_combo.currentText()
-                if not group_b:
-                    QMessageBox.information(self, "Compare Groups", "Choose Group B.")
-                    self._status_label.setText("")
-                    return
-                curves_b = self._wavelet_curves_for_group(group_b)
-                if len(curves_b) < 2:
-                    QMessageBox.information(
-                        self, "Compare Groups",
-                        f"Group '{group_b}' needs at least 2 trials with wavelet results.",
-                    )
-                    self._status_label.setText("")
-                    return
-                if method == "SPM":
-                    result = spm_compare_curves(curves_a, curves_b)
-                    kind = "spm"
-                else:
-                    result = cross_group_cossim_curves(curves_a, curves_b)
-                    kind = "cossim"
-                title = f"{group_a} vs {group_b} ({self._wavelet_channel}), cross-group"
-            else:
-                if method == "SPM":
-                    QMessageBox.information(
-                        self, "Compare Groups",
-                        "SPM requires two groups -- check 'Compare across two groups'.",
-                    )
-                    self._status_label.setText("")
-                    return
-                result = within_group_cossim_curves(curves_a)
-                kind = "cossim"
-                title = f"{group_a} ({self._wavelet_channel}), within-group"
+            result = spm_compare_curves(curves_a, curves_b)
         except Exception as e:
             QMessageBox.critical(self, "Compare Groups Failed", str(e))
             self._status_label.setText("Group comparison failed.")
             return
 
+        title = f"{group_a} vs {group_b} ({self._wavelet_channel})"
         self._wavelet_compare_result = result
-        self._wavelet_compare_kind = kind
         self._wavelet_compare_title = title
-        if kind == "cossim":
-            summary = similarity_summary(result)
-            self._populate_cossim_table(result)
-            if summary["n_pairs"]:
-                self._status_label.setText(
-                    f"Comparison computed ({title}): mean={summary['mean']:.3f}, "
-                    f"sd={summary['sd']:.3f} over {summary['n_pairs']} pair(s)."
-                )
-            else:
-                self._status_label.setText(f"Comparison computed ({title}): no overlapping pairs.")
-        else:
-            self._populate_spm_table(result)
-            verdict = "significant difference detected" if result.h0reject else "no significant difference"
-            self._status_label.setText(f"Comparison computed ({title}): {verdict}.")
+        self._populate_spm_table(result)
+        verdict = "significant difference detected" if result.h0reject else "no significant difference"
+        self._status_label.setText(f"Comparison computed ({title}): {verdict}.")
 
         self._sync_wavelet_compare_option()
         self._update_chart()
@@ -2261,6 +2409,10 @@ class AdvancedAnalysisWidget(QWidget):
         self._chart_view.show_figure(fig, filename_stem="group_synergy_summary")
 
     def _show_wavelet_chart(self, trial_name):
+        if self._wavelet_scalogram_check.isChecked():
+            self._show_wavelet_scalogram(trial_name)
+            return
+
         curve = self._wavelet_results[trial_name]
         st = self._chart_style
         dash = None if st["line_dash"] == "solid" else st["line_dash"]
@@ -2281,6 +2433,90 @@ class AdvancedAnalysisWidget(QWidget):
             yaxis_title=st["ylabel"] or "Median frequency (Hz)",
         )
         self._chart_view.show_figure(fig, filename_stem=f"{trial_name}_wavelet")
+
+    # Cap on rendered time samples for the scalogram heatmap -- a full
+    # multi-second trial at typical EMG sampling rates has tens of
+    # thousands of samples; Plotly (browser-side) gets sluggish well before
+    # that, and a scalogram is a visual/exploratory tool where this many
+    # points is far more resolution than a screen can show anyway.
+    _SCALOGRAM_MAX_TIME_SAMPLES = 1500
+
+    def _show_wavelet_scalogram(self, trial_name):
+        """Time x frequency power heatmap (a "scalogram") for one
+        participant/channel's full, real-time signal, with the
+        instantaneous median-frequency ridge overlaid and each included
+        cycle's boundaries marked -- the visual-inspection counterpart to
+        the cycle-averaged curve _show_wavelet_chart shows by default."""
+        trial = self._dataset[trial_name]
+        channel = self._wavelet_channel
+        freq_low = self._wavelet_freq_low_spin.value()
+        freq_high = self._wavelet_freq_high_spin.value()
+        n_freqs = self._wavelet_nfreqs_spin.value()
+        wavelet = self._wavelet_string()
+
+        prepared = self._get_wavelet_prepared(trial, freq_low, freq_high)
+        data = np.asarray(prepared.emg[channel], dtype=float)
+        fs = prepared.emg.fs
+
+        self._status_label.setText("Computing scalogram...")
+        QApplication.processEvents()
+        try:
+            time_s, freqs_hz, power, inst_medfreq = wavelet_scalogram(
+                data, fs, freq_low=freq_low, freq_high=freq_high, n_freqs=n_freqs, wavelet=wavelet,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Scalogram Failed", str(e))
+            self._chart_view.show_placeholder("Scalogram computation failed.")
+            return
+
+        # Downsample the time axis only for display -- see
+        # _SCALOGRAM_MAX_TIME_SAMPLES.
+        stride = max(1, len(time_s) // self._SCALOGRAM_MAX_TIME_SAMPLES)
+        time_s = time_s[::stride]
+        power = power[:, ::stride]
+        inst_medfreq = inst_medfreq[::stride]
+
+        self._refresh_series_swatches([])
+        fig = go.Figure(data=go.Heatmap(
+            x=time_s, y=freqs_hz, z=power,
+            colorscale="Viridis", colorbar=dict(title="Power"),
+        ))
+        fig.update_yaxes(type="log")
+
+        # Cone of influence: dim the edge-affected region below the
+        # boundary curve (frequencies too low to have enough temporal
+        # support this close to the signal's start/end) rather than hide it
+        # outright -- the underlying heatmap color still shows through
+        # faintly, same visual language as the reference figure's grey
+        # wedge + dashed boundary.
+        coi_freq = np.clip(cone_of_influence(time_s, wavelet), freq_low, freq_high)
+        fig.add_trace(go.Scatter(
+            x=time_s, y=np.full_like(time_s, freq_low), mode="lines",
+            line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=time_s, y=coi_freq, mode="lines", name="Cone of influence",
+            line=dict(color="#f8f8f2", width=1, dash="dash"),
+            fill="tonexty", fillcolor="rgba(40,42,54,0.6)",
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=time_s, y=inst_medfreq, mode="lines", name="Median freq",
+            line=dict(color="#50fa7b", dash="dash", width=2),
+        ))
+        for t0, t1 in trial.cycles:
+            fig.add_vline(x=t0, line=dict(color="#f8f8f2", width=1, dash="dot"))
+            fig.add_vline(x=t1, line=dict(color="#f8f8f2", width=1, dash="dot"))
+
+        st = self._chart_style
+        self._apply_common_style(
+            fig,
+            default_title=f"Wavelet scalogram — {trial_name} ({channel})",
+            xaxis_title=st["xlabel"] or "Time (s)",
+            yaxis_title=st["ylabel"] or "Frequency (Hz)",
+        )
+        self._status_label.setText(f"Scalogram computed for {trial_name} ({channel}).")
+        self._chart_view.show_figure(fig, filename_stem=f"{trial_name}_scalogram")
 
     def _show_wavelet_group_chart(self):
         """Group-level consensus plot: mean +/- SD instantaneous
@@ -2335,15 +2571,10 @@ class AdvancedAnalysisWidget(QWidget):
         self._chart_view.show_figure(fig, filename_stem="wavelet_group_summary")
 
     def _show_wavelet_compare_chart(self):
-        """Dispatches to whichever render helper matches the last "Compare
-        Groups" run's method -- the same heatmap/SPM panel Cosine
-        Similarity/SPM (Synergy) use, since within_group_cossim_curves/
-        cross_group_cossim_curves/spm_compare_curves return the same
-        SimilarityMatrix/SPMResult shapes."""
-        if self._wavelet_compare_kind == "spm":
-            self._render_spm_chart(self._wavelet_compare_result, self._wavelet_compare_title)
-        else:
-            self._render_cossim_heatmap(self._wavelet_compare_result, self._wavelet_compare_title)
+        """Renders the last "Compare Groups" SPM run -- reuses the same
+        panel SPM (Synergy) uses, since spm_compare_curves returns the same
+        SPMResult shape as spm_compare."""
+        self._render_spm_chart(self._wavelet_compare_result, self._wavelet_compare_title)
 
     def _show_cossim_chart(self):
         if self._cossim_result is None:

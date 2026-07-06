@@ -634,30 +634,16 @@ def spm_compare(
     return _spm_from_curves(curves_a, curves_b, alpha, two_tailed)
 
 
-def within_group_cossim_curves(curves: dict[str, np.ndarray]) -> SimilarityMatrix:
-    """Pairwise cosine similarity across a dict of already-extracted, named
-    curves (e.g. Wavelet's per-trial median-frequency curves) -- same math
-    as within_group_cossim, but for callers that don't have a classified
-    MusclesyneRgies batch (no cross-trial relabeling needed when the curve's
-    identity, e.g. a muscle channel name, is already stable across trials)."""
-    return _cossim_matrix(curves, curves, skip_self=True)
-
-
-def cross_group_cossim_curves(
-    curves_a: dict[str, np.ndarray], curves_b: dict[str, np.ndarray]
-) -> SimilarityMatrix:
-    """Cross-group counterpart of within_group_cossim_curves."""
-    return _cossim_matrix(curves_a, curves_b, skip_self=False)
-
-
 def spm_compare_curves(
     curves_a: dict[str, np.ndarray],
     curves_b: dict[str, np.ndarray],
     alpha: float = 0.05,
     two_tailed: bool = True,
 ) -> SPMResult:
-    """SPM counterpart of within_group_cossim_curves/cross_group_cossim_curves
-    -- two-sample SPM{t} directly on two dicts of named curves."""
+    """Two-sample SPM{t} directly on two dicts of already-extracted, named
+    curves (e.g. Wavelet's per-trial median-frequency curves) -- same core
+    as spm_compare, but for callers that don't have a classified
+    MusclesyneRgies batch to extract a synergy vector from."""
     return _spm_from_curves(list(curves_a.values()), list(curves_b.values()), alpha, two_tailed)
 
 
