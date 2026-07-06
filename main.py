@@ -1319,6 +1319,19 @@ class MainWindow(QMainWindow):
         self._btn_align_stitch.clicked.connect(self.alignStitchButtonClicked)
         widgets.kinematics_right.layout().insertWidget(0, self._btn_align_stitch)
 
+        # "Export All Events" — batch counterpart to the playbar's per-
+        # participant "Export Events" button (see _exportParticipantEvents),
+        # appended below the participant tree so the whole workspace's
+        # events/cycles can be exported in one click instead of one-by-one.
+        self._btn_export_all_events = QPushButton(self.tr("Export All Events"))
+        self._btn_export_all_events.setMinimumHeight(36)
+        self._btn_export_all_events.setCursor(Qt.PointingHandCursor)
+        self._btn_export_all_events.setStyleSheet(
+            "color:#f4f4f4; background-color:#333b46; border-radius:6px; padding:4px 8px;"
+        )
+        self._btn_export_all_events.clicked.connect(self.exportAllEventsButtonClicked)
+        widgets.kinematics_right.layout().addWidget(self._btn_export_all_events)
+
         # QTableWidget PARAMETERS
         # ///////////////////////////////////////////////////////////////
         widgets.tableWidget.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -2540,6 +2553,7 @@ class MainWindow(QMainWindow):
         widgets.kinematics_label_tree.clear()
         widgets.frequency_participants.clear()
         widgets.stats_page.on_workspace_changed(None)
+        widgets.advanced_page.on_workspace_changed(None, None)
         # singleEMG is now (None, None, None) after reset() — this hides the
         # Time Domain "Previous/Current Process" plots instead of leaving the
         # last-viewed channel's waveform on screen.
@@ -3975,13 +3989,24 @@ class MainWindow(QMainWindow):
         widgets.scrollArea_3.deleteAllPages()
         self.updateFreqAnalysisFFTPanel()
 
-    def _exportParticipantEvents(self, p):
-        """Export events and detection results to <workspace>/<name>/<name>_Events.csv.
+    def _exportParticipantEventsCore(self, p):
+        """Write <workspace>/<name>/<name>_Events.csv for one participant.
 
         Layout:
-          Section 1 — user / C3D events (Time, Label), sorted by time.
-          Section 2 — onset/offset detection results grouped by muscle,
+          Section 1 — plain named events (Time, Label), sorted by time --
+                       excludes Cycle*/Onset*/Offset* events, which get their
+                       own paired sections below instead of showing up here
+                       as flat, individually-timestamped rows.
+          Section 2 — cycle boundaries grouped by task, one row per cycle
+                       number showing paired (Start, End) -- see
+                       core.cycle_detection's CycleStart_/CycleEnd_ convention.
+          Section 3 — onset/offset detection results grouped by muscle,
                        showing paired (Onset, Offset) on each row.
+
+        Returns the written path, or None if the participant has no events
+        to export (not an error -- callers decide how to report that).
+        Raises on write failure so batch callers can tally per-participant
+        errors instead of the exception aborting the whole run.
         """
         import csv as _csv
         import re as _re
@@ -3994,17 +4019,28 @@ class MainWindow(QMainWindow):
             key=lambda e: e.time_s,
         )
 
-        # Split into named events and auto-detection events
-        named_events = [e for e in all_events if e.context != "Detection"]
+        # Split into plain named events, cycle events, and auto-detection events
+        cycle_events = [e for e in all_events if e.context == "Cycle"]
         detect_events = [e for e in all_events if e.context == "Detection"]
+        named_events = [e for e in all_events if e.context not in ("Cycle", "Detection")]
 
-        if not named_events and not detect_events:
-            QMessageBox.information(
-                self, self.tr("Export Events"),
-                self.tr("No events to export for {}.".format(p.name)),
-                QMessageBox.Ok,
-            )
-            return
+        if not named_events and not cycle_events and not detect_events:
+            return None
+
+        # Parse cycle events into {task: {cycle_num: {start|end: time_s}}} --
+        # same CycleStart_<task>[ #n] / CycleEnd_<task>[ #n] convention as
+        # core.cycle_detection._cycles_from_events, but grouped per task
+        # rather than resolved to one task (this is a display/export of
+        # everything present, not a boundary-resolution call).
+        _CYCLE_RE = _re.compile(r'^Cycle(Start|End)_(.+?)(?:\s+#(\d+))?$')
+        cycle_map = {}
+        for ev in cycle_events:
+            m = _CYCLE_RE.match(ev.label)
+            if not m:
+                continue
+            kind, task, num_txt = m.group(1).lower(), m.group(2), m.group(3)
+            num = int(num_txt) if num_txt else 1
+            cycle_map.setdefault(task, {}).setdefault(num, {})[kind] = round(ev.time_s, 4)
 
         # Parse detection events into {muscle: {activation_num: {onset|offset: time_s}}}
         _DET_RE = _re.compile(r'^(Onset|Offset)_(.+?)(?:\s+#(\d+))?$')
@@ -4022,47 +4058,114 @@ class MainWindow(QMainWindow):
         os.makedirs(participant_dir, exist_ok=True)
         out_path = os.path.join(participant_dir, "{}_Events.csv".format(p.name))
 
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            f.write("# Participant: {}\n".format(p.name))
+            f.write("# Exported: {}\n".format(_dt.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+            # --- Section 1: plain named events ---
+            if named_events:
+                f.write("#\n# Events\n")
+                w = _csv.DictWriter(f, fieldnames=["Time (s)", "Label"])
+                w.writeheader()
+                for ev in named_events:
+                    w.writerow({"Time (s)": round(ev.time_s, 4), "Label": ev.label})
+
+            # --- Section 2: cycle boundaries grouped by task ---
+            if cycle_map:
+                f.write("#\n# Cycles\n")
+                w = _csv.DictWriter(f, fieldnames=["Task", "Cycle", "Start (s)", "End (s)"])
+                w.writeheader()
+                for task in sorted(cycle_map):
+                    for num in sorted(cycle_map[task]):
+                        pair = cycle_map[task][num]
+                        w.writerow({
+                            "Task":      task,
+                            "Cycle":     num,
+                            "Start (s)": pair.get("start", ""),
+                            "End (s)":   pair.get("end", ""),
+                        })
+
+            # --- Section 3: detection results grouped by muscle ---
+            if detection_map:
+                f.write("#\n# Onset/Offset Detection\n")
+                w = _csv.DictWriter(
+                    f, fieldnames=["Muscle", "Activation", "Onset (s)", "Offset (s)"]
+                )
+                w.writeheader()
+                for muscle in sorted(detection_map):
+                    for num in sorted(detection_map[muscle]):
+                        pair = detection_map[muscle][num]
+                        w.writerow({
+                            "Muscle":      muscle,
+                            "Activation":  num,
+                            "Onset (s)":   pair.get("onset", ""),
+                            "Offset (s)":  pair.get("offset", ""),
+                        })
+
+        return out_path
+
+    def _exportParticipantEvents(self, p):
+        """Single-participant "Export Events" button (kinematics playbar)."""
         try:
-            with open(out_path, "w", newline="", encoding="utf-8") as f:
-                f.write("# Participant: {}\n".format(p.name))
-                f.write("# Exported: {}\n".format(_dt.now().strftime("%Y-%m-%d %H:%M:%S")))
-
-                # --- Section 1: named events ---
-                if named_events:
-                    f.write("#\n# Events\n")
-                    w = _csv.DictWriter(f, fieldnames=["Time (s)", "Label"])
-                    w.writeheader()
-                    for ev in named_events:
-                        w.writerow({"Time (s)": round(ev.time_s, 4), "Label": ev.label})
-
-                # --- Section 2: detection results grouped by muscle ---
-                if detection_map:
-                    f.write("#\n# Onset/Offset Detection\n")
-                    w = _csv.DictWriter(
-                        f, fieldnames=["Muscle", "Activation", "Onset (s)", "Offset (s)"]
-                    )
-                    w.writeheader()
-                    for muscle in sorted(detection_map):
-                        for num in sorted(detection_map[muscle]):
-                            pair = detection_map[muscle][num]
-                            w.writerow({
-                                "Muscle":      muscle,
-                                "Activation":  num,
-                                "Onset (s)":   pair.get("onset", ""),
-                                "Offset (s)":  pair.get("offset", ""),
-                            })
-
-            QMessageBox.information(
-                self, self.tr("Export Events"),
-                self.tr("Events saved to:\n{}".format(out_path)),
-                QMessageBox.Ok,
-            )
+            out_path = self._exportParticipantEventsCore(p)
         except Exception as e:
             QMessageBox.critical(
                 self, self.tr("error"),
                 self.tr("Failed to export events: {}".format(str(e))),
                 QMessageBox.Ok,
             )
+            return
+
+        if out_path is None:
+            QMessageBox.information(
+                self, self.tr("Export Events"),
+                self.tr("No events to export for {}.".format(p.name)),
+                QMessageBox.Ok,
+            )
+            return
+
+        QMessageBox.information(
+            self, self.tr("Export Events"),
+            self.tr("Events saved to:\n{}".format(out_path)),
+            QMessageBox.Ok,
+        )
+
+    def exportAllEventsButtonClicked(self):
+        """Batch "Export All Events" button (Kinematics Inspection page,
+        below the participant tree) -- runs _exportParticipantEventsCore()
+        for every workspace participant instead of requiring one Export
+        Events click per participant, then reports one summary dialog."""
+        if not self.workspace or not self.workspace.participants:
+            QMessageBox.information(
+                self, self.tr("Export All Events"),
+                self.tr("No participants in the current workspace."),
+                QMessageBox.Ok,
+            )
+            return
+
+        exported, skipped, errors = [], [], []
+        for p in self.workspace.participants:
+            try:
+                out_path = self._exportParticipantEventsCore(p)
+            except Exception as e:
+                errors.append("{}: {}".format(p.name, str(e)))
+                continue
+            if out_path is None:
+                skipped.append(p.name)
+            else:
+                exported.append(p.name)
+
+        summary = ["Exported: {}".format(len(exported))]
+        if skipped:
+            summary.append("No events (skipped): {}".format(", ".join(skipped)))
+        if errors:
+            summary.append("Failed:\n" + "\n".join(errors))
+
+        (QMessageBox.warning if errors else QMessageBox.information)(
+            self, self.tr("Export All Events"),
+            self.tr("\n".join(summary)),
+            QMessageBox.Ok,
+        )
 
     def applyFreqAnalysisEvents(self):
         """Batch-cut every checked participant's trial (self.
@@ -5102,6 +5205,7 @@ class MainWindow(QMainWindow):
         self.enableAutoSave(True)
 
         widgets.stats_page.on_workspace_changed(self.home)
+        widgets.advanced_page.on_workspace_changed(self.workspace, self.home)
         return 0
 
     def saveWorkSpace(self):
@@ -5133,6 +5237,7 @@ class MainWindow(QMainWindow):
         self.enableAutoSave(True)
 
         widgets.stats_page.on_workspace_changed(self.home)
+        widgets.advanced_page.on_workspace_changed(self.workspace, self.home)
         return 0
 
     def populateKinematicTree(self, tree: QTreeWidget, participants):

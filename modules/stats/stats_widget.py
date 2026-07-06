@@ -11,10 +11,10 @@ import os as _os
 import csv as _csv
 import pandas as pd
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QSplitter, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QComboBox, QTreeWidget, QTreeWidgetItem,
+    QPushButton, QComboBox, QLineEdit, QListWidget, QListWidgetItem,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QFileDialog, QMessageBox, QDialog, QStackedWidget,
 )
@@ -28,61 +28,6 @@ from .chart_view import StatsChartView
 from .dataset import read_table, infer_columns
 from .import_dialog import ImportColumnDialog
 from .imported_panel import ImportedAnalysisPanel
-
-
-# ── Group assignment button ───────────────────────────────────────────────────
-
-class GroupButton(QPushButton):
-    """Cycles through group assignments on each click."""
-
-    GROUPS = ["None", "Group 1", "Group 2", "Group 3", "Group 4"]
-    _BG = {
-        "None":    "#44475a",
-        "Group 1": "#6272a4",
-        "Group 2": "#ff9f43",
-        "Group 3": "#26de81",
-        "Group 4": "#fc5c65",
-    }
-    _FG = {
-        "None":    "#888888",
-        "Group 1": "#ffffff",
-        "Group 2": "#ffffff",
-        "Group 3": "#1a1a1a",
-        "Group 4": "#ffffff",
-    }
-
-    groupChanged = Signal(str, str)  # (participant_name, new_group)
-
-    def __init__(self, participant: str, group: str = "None", parent=None):
-        super().__init__(parent)
-        self._participant = participant
-        self._idx = self.GROUPS.index(group) if group in self.GROUPS else 0
-        self._apply()
-        self.clicked.connect(self._cycle)
-        self.setFixedWidth(82)
-        self.setFixedHeight(22)
-        self.setCursor(Qt.PointingHandCursor)
-
-    def _cycle(self):
-        self._idx = (self._idx + 1) % len(self.GROUPS)
-        self._apply()
-        self.groupChanged.emit(self._participant, self.current_group())
-
-    def _apply(self):
-        g = self.current_group()
-        self.setText(g)
-        self.setStyleSheet(
-            f"QPushButton{{background:{self._BG[g]};color:{self._FG[g]};"
-            f"border-radius:3px;font-size:11px;padding:1px 6px;border:none;}}"
-        )
-
-    def current_group(self) -> str:
-        return self.GROUPS[self._idx]
-
-    def set_group(self, group: str):
-        if group in self.GROUPS:
-            self._idx = self.GROUPS.index(group)
-            self._apply()
 
 
 # ── Main widget ───────────────────────────────────────────────────────────────
@@ -103,8 +48,7 @@ class StatsWidget(QWidget):
         self._workspace_path: str | None = None
         self._df: pd.DataFrame | None = None
         self._data_source_label: str = "No data loaded"
-        self._groups: dict[str, str] = {}           # {participant: group_label}
-        self._group_buttons: dict[str, GroupButton] = {}
+        self._groups: dict[str, str] = {}           # {participant: user-typed group name}
         self._last_result: dict | None = None
         self._imported_panel: ImportedAnalysisPanel | None = None
         self._setup_ui()
@@ -161,27 +105,53 @@ class StatsWidget(QWidget):
         self._source_label.setWordWrap(True)
         vl.addWidget(self._source_label)
 
-        self._participant_tree = QTreeWidget()
-        self._participant_tree.setHeaderLabels(["Name", "Group"])
-        hdr = self._participant_tree.header()
-        hdr.setSectionResizeMode(0, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(1, QHeaderView.Fixed)
-        hdr.resizeSection(1, 90)
-        self._participant_tree.setSelectionMode(QAbstractItemView.NoSelection)
-        self._participant_tree.setRootIsDecorated(False)
-        self._participant_tree.setStyleSheet(
-            "QTreeWidget{background:#1e1f28;color:#f8f8f2;border:none;font-size:12px;}"
-            "QHeaderView::section{background:#282a36;color:#6272a4;"
-            "border:none;padding:4px;font-size:11px;}"
-        )
-        vl.addWidget(self._participant_tree, stretch=1)
-
-        hint = self._lbl(
-            "Click group chip to cycle:  None → G1 → G2 → G3 → G4",
+        group_hint = self._lbl(
+            "Name a group, check which participants belong to it, then Add "
+            "Group -- repeat for as many groups as needed. Participants "
+            "never added to a group are left ungrouped.",
             color="#6272a4", size=10,
         )
-        hint.setWordWrap(True)
-        vl.addWidget(hint)
+        group_hint.setWordWrap(True)
+        vl.addWidget(group_hint)
+
+        self._group_name_edit = QLineEdit()
+        self._group_name_edit.setPlaceholderText("Group name, e.g. Control")
+        vl.addWidget(self._group_name_edit)
+
+        vl.addWidget(self._lbl("Available participants", color="#6272a4", size=10))
+        self._participant_list = QListWidget()
+        self._participant_list.setStyleSheet(
+            "QListWidget{background:#1e1f28;color:#f8f8f2;border:none;font-size:12px;}"
+        )
+        vl.addWidget(self._participant_list, stretch=1)
+
+        btn_add_group = QPushButton("Add Group")
+        btn_add_group.setStyleSheet(
+            "QPushButton{background:#6272a4;color:#ffffff;border-radius:4px;"
+            "padding:5px;font-size:12px;font-weight:bold;border:none;}"
+            "QPushButton:hover{background:#7282b4;}"
+        )
+        btn_add_group.setCursor(Qt.PointingHandCursor)
+        btn_add_group.clicked.connect(self._add_group)
+        vl.addWidget(btn_add_group)
+
+        vl.addWidget(self._lbl("Defined groups", color="#6272a4", size=10))
+        self._groups_summary_list = QListWidget()
+        self._groups_summary_list.setMaximumHeight(90)
+        self._groups_summary_list.setStyleSheet(
+            "QListWidget{background:#1e1f28;color:#f8f8f2;border:none;font-size:11px;}"
+        )
+        vl.addWidget(self._groups_summary_list)
+
+        btn_clear_groups = QPushButton("Clear All Groups")
+        btn_clear_groups.setStyleSheet(
+            "QPushButton{background:#44475a;color:#f8f8f2;border-radius:4px;"
+            "padding:5px;font-size:12px;border:none;}"
+            "QPushButton:hover{background:#6272a4;}"
+        )
+        btn_clear_groups.setCursor(Qt.PointingHandCursor)
+        btn_clear_groups.clicked.connect(self._clear_groups)
+        vl.addWidget(btn_clear_groups)
 
         btn_refresh = QPushButton("Refresh Data")
         btn_refresh.setStyleSheet(
@@ -388,28 +358,73 @@ class StatsWidget(QWidget):
         self._right_stack.setCurrentWidget(self._imported_panel)
 
     def _refresh_participant_list(self):
-        self._participant_tree.clear()
-        self._group_buttons.clear()
+        """Rebuild the "Available participants" checklist from the current
+        workspace summary -- shows only participants not yet assigned to a
+        group (an assigned one drops out once Add Group is clicked, so the
+        next group's checklist doesn't re-offer it), and drops assignments
+        for participant names no longer present in the data."""
+        self._participant_list.clear()
 
         if self._df is None or self._df.empty:
+            self._groups.clear()
+            self._refresh_groups_summary()
             return
 
         participants = sorted(self._df["Participant"].dropna().unique().tolist())
+        self._groups = {n: g for n, g in self._groups.items() if n in participants}
         for name in participants:
-            item = QTreeWidgetItem(self._participant_tree, [name, ""])
-            btn = GroupButton(name, self._groups.get(name, "None"))
-            btn.groupChanged.connect(self._on_group_changed)
-            self._participant_tree.setItemWidget(item, 1, btn)
-            self._group_buttons[name] = btn
+            if name in self._groups:
+                continue
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self._participant_list.addItem(item)
+        self._refresh_groups_summary()
 
     def _refresh_participant_list_for_subjects(self, subjects: list):
         """Read-only subject list for imported data — grouping comes from the
         chosen within/between factor columns, not manual per-subject tagging."""
-        self._participant_tree.clear()
-        self._group_buttons.clear()
+        self._participant_list.clear()
+        self._groups_summary_list.clear()
         self._groups.clear()
         for name in subjects:
-            QTreeWidgetItem(self._participant_tree, [str(name), ""])
+            item = QListWidgetItem(str(name))
+            item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
+            self._participant_list.addItem(item)
+
+    def _refresh_groups_summary(self):
+        self._groups_summary_list.clear()
+        counts = {}
+        for group in self._groups.values():
+            counts[group] = counts.get(group, 0) + 1
+        for group, n in counts.items():
+            self._groups_summary_list.addItem(f"{group}  ({n} participant{'s' if n != 1 else ''})")
+
+    def _add_group(self):
+        group_name = self._group_name_edit.text().strip()
+        if not group_name:
+            QMessageBox.information(self, "Add Group", "Enter a group name first.")
+            return
+
+        checked = [
+            self._participant_list.item(i).text()
+            for i in range(self._participant_list.count())
+            if self._participant_list.item(i).checkState() == Qt.Checked
+        ]
+        if not checked:
+            QMessageBox.information(self, "Add Group", "Check at least one participant.")
+            return
+
+        for name in checked:
+            self._groups[name] = group_name
+        self._group_name_edit.clear()
+        self._refresh_participant_list()
+        self._update_chart()
+
+    def _clear_groups(self):
+        self._groups.clear()
+        self._refresh_participant_list()
+        self._update_chart()
 
     def _refresh_combos(self):
         if self._df is None or self._df.empty:
@@ -442,10 +457,6 @@ class StatsWidget(QWidget):
             cb.blockSignals(False)
 
     # ── event handlers ────────────────────────────────────────────────────────
-
-    def _on_group_changed(self, participant: str, group: str):
-        self._groups[participant] = group
-        self._update_chart()
 
     def _on_controls_changed(self):
         self._update_chart()
