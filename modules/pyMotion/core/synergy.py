@@ -416,6 +416,251 @@ def classify_kmeans(
     return classified
 
 
+# ---------------------------------------------------------------------------
+# Cosine-similarity comparison, within one classified group or across two
+# (R/calculate_similarity.R, R/calculate_specific_synergy_similarity2.R)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SimilarityMatrix:
+    """Pairwise cosine-similarity matrix between two (possibly identical)
+    sets of trials, for one synergy signal.
+
+    row_labels/col_labels: participant/trial names, in the order the input
+        dicts were iterated (Python dict order == insertion/load order).
+    matrix: shape (len(row_labels), len(col_labels)); NaN where undefined
+        (a trial doesn't have the requested synergy label, or -- for the
+        within-group case -- the self-comparison cell).
+    """
+
+    row_labels: list
+    col_labels: list
+    matrix: np.ndarray
+
+
+def _synergy_vector(result: MusclesyneRgies, syn_name: str, syn_type: str, n_points: Optional[int]):
+    """One trial's vector for a given synergy label, ready for cossim().
+
+    syn_type "M": the muscle-weighting column (length n_muscles) -- a
+        single fit per trial, so no cycle count/length issue across trials.
+    syn_type "P": the trial's cycle-averaged activation pattern (length
+        n_points), via the same cycle-averaging classify_kmeans() already
+        uses -- NOT the raw concatenated P column, which R's reference
+        script reads directly but which only has a consistent length there
+        because every trial in that dataset had the same rep count; this
+        codebase allows trials with different cycle counts (see subset_cycles),
+        so comparing raw concatenated columns could compare mismatched
+        lengths or, worse, silently compare different numbers of cycles.
+    Returns None if the trial has no such synergy label (e.g. reclassified
+    as "Syncombined_*").
+    """
+    if syn_name not in result.syn_names:
+        return None
+    idx = result.syn_names.index(syn_name)
+    if syn_type == "M":
+        return result.M[:, idx]
+    elif syn_type == "P":
+        if n_points is None:
+            raise ValueError("n_points is required for syn_type='P'")
+        return _cycle_average_pattern(result.P, n_points)[idx]
+    else:
+        raise ValueError("syn_type must be 'M' or 'P'")
+
+
+def _cossim_matrix(vectors_a: dict, vectors_b: dict, skip_self: bool) -> SimilarityMatrix:
+    row_labels = list(vectors_a.keys())
+    col_labels = list(vectors_b.keys())
+    mat = np.full((len(row_labels), len(col_labels)), np.nan)
+    for i, id1 in enumerate(row_labels):
+        for j, id2 in enumerate(col_labels):
+            if skip_self and id1 == id2:
+                continue
+            v1, v2 = vectors_a[id1], vectors_b[id2]
+            if v1 is not None and v2 is not None:
+                mat[i, j] = cossim(v1, v2)
+    return SimilarityMatrix(row_labels, col_labels, mat)
+
+
+def within_group_cossim(
+    classified: dict[str, MusclesyneRgies],
+    syn_name: str,
+    syn_type: str = "M",
+    n_points: Optional[int] = None,
+) -> SimilarityMatrix:
+    """Pairwise cosine similarity of one synergy label across every trial in
+    a single classified group (R/calculate_similarity.R). Self-pairs are
+    left NaN (a trial is not compared against itself), matching the
+    reference script's untouched diagonal.
+
+    `classified` should already be the output of classify_kmeans() run on
+    just one comparison group -- classification is not group-aware here,
+    so passing in trials from more than one independently-classified group
+    would compare label numbers that don't mean the same thing.
+    """
+    vectors = {name: _synergy_vector(r, syn_name, syn_type, n_points) for name, r in classified.items()}
+    return _cossim_matrix(vectors, vectors, skip_self=True)
+
+
+def cross_group_cossim(
+    classified_a: dict[str, MusclesyneRgies],
+    classified_b: dict[str, MusclesyneRgies],
+    syn_name_a: str,
+    syn_name_b: str,
+    syn_type: str = "M",
+    n_points: Optional[int] = None,
+) -> SimilarityMatrix:
+    """Pairwise cosine similarity between every trial in group A's `syn_name_a`
+    and every trial in group B's `syn_name_b` (R/calculate_specific_synergy_
+    similarity2.R's cross-group path). `syn_name_a`/`syn_name_b` may differ
+    -- since each group is classified independently, "Syn1" in one group has
+    no guaranteed correspondence to "Syn1" in another; the caller picks
+    which pair to compare.
+    """
+    vectors_a = {name: _synergy_vector(r, syn_name_a, syn_type, n_points) for name, r in classified_a.items()}
+    vectors_b = {name: _synergy_vector(r, syn_name_b, syn_type, n_points) for name, r in classified_b.items()}
+    return _cossim_matrix(vectors_a, vectors_b, skip_self=False)
+
+
+def similarity_summary(sim: SimilarityMatrix) -> dict:
+    """Mean/SD/suggested-threshold over a similarity matrix's finite values
+    (R script's "mean + 1 SD" cutoff suggestion). Empty/all-NaN input
+    returns NaNs rather than raising, since "no overlapping pairs" is a
+    normal outcome (e.g. two trials never share a synergy label)."""
+    finite = sim.matrix[np.isfinite(sim.matrix)]
+    if finite.size == 0:
+        return {"mean": np.nan, "sd": np.nan, "threshold": np.nan, "n_pairs": 0}
+    mean = float(finite.mean())
+    sd = float(finite.std(ddof=1)) if finite.size > 1 else 0.0
+    return {"mean": mean, "sd": sd, "threshold": mean + sd, "n_pairs": int(finite.size)}
+
+
+# ---------------------------------------------------------------------------
+# Statistical Parametric Mapping -- two-sample SPM{t} on synergy activation
+# patterns across two groups (R/MATLAB reference: R_Matlab_functions/MS_SPM.m,
+# via the spm1d package -- same library, same algorithm, just called from
+# Python instead of MATLAB/R).
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SPMResult:
+    """Two-sample SPM{t} result comparing one synergy label's activation
+    pattern between two groups, one point per % of cycle.
+
+    z: the SPM{t} statistic curve, length n_points.
+    zstar: the RFT-corrected critical threshold at `alpha` (two-tailed by
+        default, matching the R reference's spmi.inference(alpha,'two_tailed')).
+    clusters: (start, end, p) for each suprathreshold cluster spm1d found
+        -- the "significant regions" the R script's spmi.plot_p_values()
+        annotates.
+    mean_a/sd_a, mean_b/sd_b: per-group mean +/- SD curves (for a
+        plot_meanSD-equivalent panel alongside the SPM{t} panel).
+    n_a/n_b: number of contributing trials per group.
+    """
+
+    z: np.ndarray
+    zstar: float
+    alpha: float
+    h0reject: bool
+    clusters: list  # [(start, end, p), ...]
+    mean_a: np.ndarray
+    sd_a: np.ndarray
+    mean_b: np.ndarray
+    sd_b: np.ndarray
+    n_a: int
+    n_b: int
+
+
+def _spm_from_curves(curves_a: list, curves_b: list, alpha: float, two_tailed: bool) -> SPMResult:
+    """Shared SPM{t} core: two lists of equal-length 1-D curves in, SPMResult
+    out. Both spm_compare() (Synergy) and spm_compare_curves() (any other
+    per-trial curve, e.g. Wavelet median frequency) funnel through here so
+    the spm1d call site and result packaging only exist once."""
+    import spm1d  # deferred: only this analysis needs it, and it pulls in matplotlib
+
+    if len(curves_a) < 2 or len(curves_b) < 2:
+        raise ValueError(
+            f"SPM needs at least 2 contributing trials per group, got "
+            f"{len(curves_a)} (A) and {len(curves_b)} (B)"
+        )
+
+    A = np.array(curves_a)
+    B = np.array(curves_b)
+    spm = spm1d.stats.ttest2(A, B, equal_var=False)
+    spmi = spm.inference(alpha, two_tailed=two_tailed)
+
+    clusters = [
+        (float(c.endpoints[0]), float(c.endpoints[1]), float(c.P))
+        for c in spmi.clusters
+    ]
+
+    return SPMResult(
+        z=np.asarray(spmi.z, dtype=float),
+        zstar=float(spmi.zstar),
+        alpha=alpha,
+        h0reject=bool(spmi.h0reject),
+        clusters=clusters,
+        mean_a=A.mean(axis=0), sd_a=A.std(axis=0, ddof=1),
+        mean_b=B.mean(axis=0), sd_b=B.std(axis=0, ddof=1),
+        n_a=len(curves_a), n_b=len(curves_b),
+    )
+
+
+def spm_compare(
+    classified_a: dict[str, MusclesyneRgies],
+    classified_b: dict[str, MusclesyneRgies],
+    syn_name_a: str,
+    syn_name_b: str,
+    n_points: int,
+    alpha: float = 0.05,
+    two_tailed: bool = True,
+) -> SPMResult:
+    """Two-sample SPM{t} comparing group A's `syn_name_a` activation pattern
+    against group B's `syn_name_b`, one curve per contributing trial (each
+    trial's cycle-averaged pattern -- same averaging classify_kmeans and
+    within_group_cossim/cross_group_cossim already use for "P"). As with
+    cross_group_cossim, `syn_name_a`/`syn_name_b` may differ since each
+    group is classified independently.
+    """
+    curves_a = [
+        v for v in (
+            _synergy_vector(r, syn_name_a, "P", n_points) for r in classified_a.values()
+        ) if v is not None
+    ]
+    curves_b = [
+        v for v in (
+            _synergy_vector(r, syn_name_b, "P", n_points) for r in classified_b.values()
+        ) if v is not None
+    ]
+    return _spm_from_curves(curves_a, curves_b, alpha, two_tailed)
+
+
+def within_group_cossim_curves(curves: dict[str, np.ndarray]) -> SimilarityMatrix:
+    """Pairwise cosine similarity across a dict of already-extracted, named
+    curves (e.g. Wavelet's per-trial median-frequency curves) -- same math
+    as within_group_cossim, but for callers that don't have a classified
+    MusclesyneRgies batch (no cross-trial relabeling needed when the curve's
+    identity, e.g. a muscle channel name, is already stable across trials)."""
+    return _cossim_matrix(curves, curves, skip_self=True)
+
+
+def cross_group_cossim_curves(
+    curves_a: dict[str, np.ndarray], curves_b: dict[str, np.ndarray]
+) -> SimilarityMatrix:
+    """Cross-group counterpart of within_group_cossim_curves."""
+    return _cossim_matrix(curves_a, curves_b, skip_self=False)
+
+
+def spm_compare_curves(
+    curves_a: dict[str, np.ndarray],
+    curves_b: dict[str, np.ndarray],
+    alpha: float = 0.05,
+    two_tailed: bool = True,
+) -> SPMResult:
+    """SPM counterpart of within_group_cossim_curves/cross_group_cossim_curves
+    -- two-sample SPM{t} directly on two dicts of named curves."""
+    return _spm_from_curves(list(curves_a.values()), list(curves_b.values()), alpha, two_tailed)
+
+
 def group_synergy_summary(classified: dict[str, MusclesyneRgies], n_points: int) -> dict:
     """Aggregate a classify_kmeans() batch into one mean M/P curve per
     synergy label -- "what does Syn1 look like across the whole cohort",

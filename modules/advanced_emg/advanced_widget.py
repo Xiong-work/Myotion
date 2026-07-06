@@ -16,9 +16,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel, QComboBox,
-    QPushButton, QSpinBox, QStackedWidget, QFileDialog, QTableWidget,
+    QPushButton, QSpinBox, QDoubleSpinBox, QStackedWidget, QFileDialog, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox, QApplication,
-    QLineEdit, QCheckBox, QColorDialog, QDialog,
+    QLineEdit, QCheckBox, QColorDialog, QDialog, QListWidget, QTabWidget,
 )
 
 import os
@@ -27,11 +27,14 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from modules.pyMotion.core.batch_io import load_external_folder
+from modules.pyMotion.core.batch_io import load_external_folder, load_external_groups
 from modules.pyMotion.core.batch_dataset import BatchDataset, subset_cycles
 from modules.pyMotion.core.synergy import (
     prepare_synergy_input, extract_synergies, classify_kmeans, group_synergy_summary,
+    within_group_cossim, cross_group_cossim, similarity_summary, spm_compare,
+    within_group_cossim_curves, cross_group_cossim_curves, spm_compare_curves,
 )
+from modules.pyMotion.core.wavelet_analysis import prepare_wavelet_input, wavelet_medfreq_curve
 from modules.pyMotion.core.timeSeriesTable import timeSeriesTable
 from .chart_view import AdvancedChartView
 
@@ -55,6 +58,16 @@ _SERIES_PALETTE = [
 # is reachable from the same dropdown used to pick an individual participant.
 GROUP_SUMMARY_LABEL = "— Group Summary (all participants) —"
 
+# Default entry in the Group filter combo -- shows every loaded participant
+# regardless of which comparison group (Control/LBP/...) they belong to.
+ALL_GROUPS_LABEL = "— All Groups —"
+
+# Synthetic entry injected into the Participant combo for Wavelet Analysis
+# once a "Compare Groups" run has produced a result -- same idea as
+# GROUP_SUMMARY_LABEL, just for Wavelet's self-contained group comparison
+# (see synergy.py's *_curves() helpers) rather than Synergy's classified one.
+WAVELET_COMPARE_LABEL = "— Group Comparison (Wavelet) —"
+
 
 class AdvancedAnalysisWidget(QWidget):
     def __init__(self, parent=None):
@@ -68,6 +81,17 @@ class AdvancedAnalysisWidget(QWidget):
         self._synergy_results = {}   # trial_name -> MusclesyneRgies (raw, per-trial NMF)
         self._synergy_classified = {}  # trial_name -> MusclesyneRgies (classify_kmeans output, if run)
         self._synergy_n_points = None  # points/cycle actually used for the last synergy run (shared across trials)
+        self._cossim_result = None     # SimilarityMatrix for the last cosine-similarity run
+        self._cossim_title = ""        # human-readable description of what _cossim_result compares
+        self._spm_result = None        # SPMResult for the last SPM run
+        self._spm_title = ""           # human-readable description of what _spm_result compares
+        self._wavelet_prepared_cache = {}  # (trial_name, freq_low, freq_high) -> bandpass-filtered BatchTrial
+        self._wavelet_results = {}     # trial_name -> instantaneous-median-frequency curve (np.ndarray)
+        self._wavelet_channel = None   # muscle channel the current _wavelet_results was computed for
+        self._wavelet_n_points = None  # points/cycle used for the last wavelet run
+        self._wavelet_compare_result = None  # SimilarityMatrix or SPMResult, from "Compare Groups"
+        self._wavelet_compare_kind = None    # "cossim" or "spm", disambiguates the above
+        self._wavelet_compare_title = ""     # human-readable description of what _wavelet_compare_result compares
         # User-editable plot appearance; empty title/xlabel/ylabel fall back to
         # the analysis-computed defaults. Applied to whichever chart is current.
         # xlabel/ylabel are for CCI's single-plot chart; Synergy's dual-subplot
@@ -134,7 +158,29 @@ class AdvancedAnalysisWidget(QWidget):
         panel.setMinimumWidth(230)
         panel.setMaximumWidth(300)
         panel.setStyleSheet("background:#282a36;")
-        vl = QVBoxLayout(panel)
+        outer_vl = QVBoxLayout(panel)
+        outer_vl.setContentsMargins(0, 0, 0, 0)
+        outer_vl.setSpacing(0)
+
+        tabs = QTabWidget()
+        tabs.setStyleSheet(
+            "QTabWidget::pane{border:none;background:#282a36;}"
+            "QTabBar::tab{background:#1e1f28;color:#6272a4;padding:6px 16px;"
+            "font-size:12px;}"
+            "QTabBar::tab:selected{background:#282a36;color:#f8f8f2;}"
+            "QTabBar::tab:hover{color:#f8f8f2;}"
+        )
+        tabs.addTab(self._build_data_tab(), "Data")
+        tabs.addTab(self._build_processing_tab(), "Processing")
+        outer_vl.addWidget(tabs)
+        return panel
+
+    def _build_data_tab(self):
+        """Data Source + which cycles to include -- everything about what's
+        loaded, kept separate from analysis params/style so this panel
+        doesn't get too crowded to read at the sidebar's narrow width."""
+        page = QWidget()
+        vl = QVBoxLayout(page)
         vl.setContentsMargins(10, 10, 10, 10)
         vl.setSpacing(8)
 
@@ -175,19 +221,25 @@ class AdvancedAnalysisWidget(QWidget):
         self._cycle_range_note.setWordWrap(True)
         vl.addWidget(self._cycle_range_note)
 
-        vl.addSpacing(6)
-        line = QLabel()
-        line.setFixedHeight(1)
-        line.setStyleSheet("background:#44475a;")
-        vl.addWidget(line)
+        vl.addStretch()
+        return page
+
+    def _build_processing_tab(self):
+        """Analysis selection/params/Run + plot style -- everything about
+        what to compute and how to display it, once data is loaded."""
+        page = QWidget()
+        vl = QVBoxLayout(page)
+        vl.setContentsMargins(10, 10, 10, 10)
+        vl.setSpacing(8)
 
         vl.addWidget(self._lbl("Analysis", bold=True))
         self._analysis_combo = QComboBox()
         self._analysis_combo.addItems([
             "Co-contraction Index",
             "Muscle Synergy (NMF)",
-            "Wavelet Analysis (coming soon)",
-            "Statistical Parametric Mapping (coming soon)",
+            "Cosine Similarity (Synergy)",
+            "Wavelet Analysis (CWT)",
+            "Statistical Parametric Mapping (SPM)",
         ])
         self._style_combo(self._analysis_combo)
         self._analysis_combo.currentIndexChanged.connect(self._on_analysis_changed)
@@ -196,12 +248,9 @@ class AdvancedAnalysisWidget(QWidget):
         self._param_stack = QStackedWidget()
         self._param_stack.addWidget(self._build_cci_params_page())
         self._param_stack.addWidget(self._build_synergy_params_page())
-        self._param_stack.addWidget(
-            self._build_coming_soon_page("Wavelet analysis is planned but not implemented yet.")
-        )
-        self._param_stack.addWidget(
-            self._build_coming_soon_page("SPM is planned but not implemented yet.")
-        )
+        self._param_stack.addWidget(self._build_cossim_params_page())
+        self._param_stack.addWidget(self._build_wavelet_params_page())
+        self._param_stack.addWidget(self._build_spm_params_page())
         vl.addWidget(self._param_stack)
 
         self._btn_run = QPushButton("Run Analysis")
@@ -219,7 +268,7 @@ class AdvancedAnalysisWidget(QWidget):
         vl.addWidget(self._build_style_panel())
 
         vl.addStretch()
-        return panel
+        return page
 
     def _build_single_axis_labels_page(self):
         page = QWidget()
@@ -455,6 +504,11 @@ class AdvancedAnalysisWidget(QWidget):
         vl.setContentsMargins(0, 6, 0, 6)
         vl.setSpacing(6)
 
+        vl.addWidget(self._lbl("Group name", size=11, color="#6272a4"))
+        self._group_name_edit = QLineEdit()
+        self._group_name_edit.setPlaceholderText("auto-filled from folder name")
+        vl.addWidget(self._group_name_edit)
+
         vl.addWidget(self._lbl("cycles/ folder", size=11, color="#6272a4"))
         row1 = QHBoxLayout()
         self._cycles_path_label = self._lbl("(not set)", size=11)
@@ -488,10 +542,43 @@ class AdvancedAnalysisWidget(QWidget):
         self._style_combo(self._cycle_mode_combo)
         vl.addWidget(self._cycle_mode_combo)
 
-        btn_load = QPushButton("Load Folder Pair")
-        self._style_button(btn_load, accent=True)
-        btn_load.clicked.connect(self._load_external_folder)
-        vl.addWidget(btn_load)
+        btn_add_group = QPushButton("Add Group")
+        self._style_button(btn_add_group, accent=True)
+        btn_add_group.clicked.connect(self._add_group_from_paths)
+        vl.addWidget(btn_add_group)
+
+        vl.addSpacing(4)
+        line = QLabel()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background:#44475a;")
+        vl.addWidget(line)
+
+        bulk_note = self._lbl(
+            "Or load every comparison group at once, one subfolder per "
+            "group (each with its own emg/ + cycles/), e.g. "
+            "Adv_Analyses/Control, Adv_Analyses/LBP:",
+            size=10, color="#6272a4",
+        )
+        bulk_note.setWordWrap(True)
+        vl.addWidget(bulk_note)
+        btn_load_parent = QPushButton("Load Parent Folder (auto-detect)...")
+        self._style_button(btn_load_parent)
+        btn_load_parent.clicked.connect(self._load_parent_groups_folder)
+        vl.addWidget(btn_load_parent)
+
+        vl.addWidget(self._lbl("Loaded groups", size=11, color="#6272a4"))
+        self._groups_list = QListWidget()
+        self._groups_list.setMaximumHeight(90)
+        self._groups_list.setStyleSheet(
+            "QListWidget{background:#1e1f28;color:#f8f8f2;border:none;"
+            "border-radius:4px;font-size:11px;}"
+        )
+        vl.addWidget(self._groups_list)
+
+        btn_clear_groups = QPushButton("Clear All Groups")
+        self._style_button(btn_clear_groups)
+        btn_clear_groups.clicked.connect(self._clear_all_groups)
+        vl.addWidget(btn_clear_groups)
 
         return page
 
@@ -505,15 +592,6 @@ class AdvancedAnalysisWidget(QWidget):
             "External Folder for now.",
             size=11, color="#6272a4",
         )
-        note.setWordWrap(True)
-        vl.addWidget(note)
-        vl.addStretch()
-        return page
-
-    def _build_coming_soon_page(self, message):
-        page = QWidget()
-        vl = QVBoxLayout(page)
-        note = self._lbl(message, size=11, color="#6272a4")
         note.setWordWrap(True)
         vl.addWidget(note)
         vl.addStretch()
@@ -667,6 +745,340 @@ class AdvancedAnalysisWidget(QWidget):
             f"Classify: {classify} (clusters: {clusters})"
         )
 
+    def _build_cossim_params_page(self):
+        """Params for cosine-similarity comparison of classified synergies --
+        within one group, or between two groups (see synergy.py's
+        within_group_cossim/cross_group_cossim). Requires Muscle Synergy
+        analysis to have already been run with classification enabled,
+        since this compares classified (cross-participant-labeled) synergies,
+        not raw per-trial NMF output."""
+        page = QWidget()
+        vl = QVBoxLayout(page)
+        vl.setContentsMargins(0, 6, 0, 6)
+        vl.setSpacing(6)
+
+        vl.addWidget(self._lbl("Signal", size=11, color="#6272a4"))
+        self._cossim_signal_combo = QComboBox()
+        self._cossim_signal_combo.addItems(["Muscle weighting (M)", "Activation pattern (P)"])
+        self._style_combo(self._cossim_signal_combo)
+        vl.addWidget(self._cossim_signal_combo)
+
+        vl.addWidget(self._lbl("Group A", size=11, color="#6272a4"))
+        self._cossim_group_a_combo = QComboBox()
+        self._style_combo(self._cossim_group_a_combo)
+        self._cossim_group_a_combo.currentIndexChanged.connect(self._on_cossim_group_a_changed)
+        vl.addWidget(self._cossim_group_a_combo)
+
+        vl.addWidget(self._lbl("Synergy A", size=11, color="#6272a4"))
+        self._cossim_syn_a_combo = QComboBox()
+        self._style_combo(self._cossim_syn_a_combo)
+        vl.addWidget(self._cossim_syn_a_combo)
+
+        self._cossim_cross_check = QCheckBox("Compare across two groups")
+        self._cossim_cross_check.setStyleSheet("color:#f8f8f2;font-size:12px;")
+        self._cossim_cross_check.stateChanged.connect(self._on_cossim_cross_toggled)
+        vl.addWidget(self._cossim_cross_check)
+
+        self._cossim_group_b_label = self._lbl("Group B", size=11, color="#6272a4")
+        vl.addWidget(self._cossim_group_b_label)
+        self._cossim_group_b_combo = QComboBox()
+        self._style_combo(self._cossim_group_b_combo)
+        self._cossim_group_b_combo.currentIndexChanged.connect(self._on_cossim_group_b_changed)
+        vl.addWidget(self._cossim_group_b_combo)
+
+        self._cossim_syn_b_label = self._lbl("Synergy B", size=11, color="#6272a4")
+        vl.addWidget(self._cossim_syn_b_label)
+        self._cossim_syn_b_combo = QComboBox()
+        self._style_combo(self._cossim_syn_b_combo)
+        vl.addWidget(self._cossim_syn_b_combo)
+
+        self._cossim_group_b_label.setVisible(False)
+        self._cossim_group_b_combo.setVisible(False)
+        self._cossim_syn_b_label.setVisible(False)
+        self._cossim_syn_b_combo.setVisible(False)
+
+        note = self._lbl(
+            "Requires Muscle Synergy analysis to have been run first with "
+            "classification enabled (Synergy Settings) -- each group is "
+            "classified independently, so a synergy label only means the "
+            "same thing within its own group.",
+            size=10, color="#6272a4",
+        )
+        note.setWordWrap(True)
+        vl.addWidget(note)
+
+        vl.addStretch()
+        return page
+
+    def _on_cossim_cross_toggled(self, _state):
+        show = self._cossim_cross_check.isChecked()
+        self._cossim_group_b_label.setVisible(show)
+        self._cossim_group_b_combo.setVisible(show)
+        self._cossim_syn_b_label.setVisible(show)
+        self._cossim_syn_b_combo.setVisible(show)
+
+    def _synergy_labels_for_group(self, group_name):
+        """Classified synergy labels ("Syn1", "Syn2", ...) actually present
+        among this group's trials, excluding "Syncombined_*" (those have no
+        stable cross-trial identity to compare by construction)."""
+        if not self._synergy_classified or self._dataset is None or not group_name:
+            return []
+        labels = set()
+        for trial in self._dataset.trials_in(group_name):
+            result = self._synergy_classified.get(trial.name)
+            if result:
+                labels.update(n for n in result.syn_names if "combined" not in n)
+        return sorted(labels, key=lambda s: int(s.replace("Syn", "")))
+
+    def _refresh_cossim_syn_combo(self, group_combo, syn_combo):
+        group_name = group_combo.currentText()
+        labels = self._synergy_labels_for_group(group_name)
+        current = syn_combo.currentText()
+        syn_combo.blockSignals(True)
+        syn_combo.clear()
+        syn_combo.addItems(labels)
+        if current in labels:
+            syn_combo.setCurrentText(current)
+        syn_combo.blockSignals(False)
+
+    def _on_cossim_group_a_changed(self, _idx):
+        self._refresh_cossim_syn_combo(self._cossim_group_a_combo, self._cossim_syn_a_combo)
+
+    def _on_cossim_group_b_changed(self, _idx):
+        self._refresh_cossim_syn_combo(self._cossim_group_b_combo, self._cossim_syn_b_combo)
+
+    def _refresh_cossim_group_combos(self):
+        groups = self._dataset.group_names if self._dataset else []
+        for combo in (self._cossim_group_a_combo, self._cossim_group_b_combo):
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(groups)
+            if current in groups:
+                combo.setCurrentText(current)
+            combo.blockSignals(False)
+        self._refresh_cossim_syn_combo(self._cossim_group_a_combo, self._cossim_syn_a_combo)
+        self._refresh_cossim_syn_combo(self._cossim_group_b_combo, self._cossim_syn_b_combo)
+
+    def _classified_for_group(self, group_name):
+        names = {t.name for t in self._dataset.trials_in(group_name)}
+        return {n: r for n, r in self._synergy_classified.items() if n in names}
+
+    def _build_spm_params_page(self):
+        """Params for two-sample SPM{t} (spm1d) comparing one synergy
+        activation pattern from group A against one from group B -- unlike
+        Cosine Similarity, SPM always compares two groups (comparing a
+        group to itself isn't a meaningful hypothesis test), so there's no
+        within/cross toggle here."""
+        page = QWidget()
+        vl = QVBoxLayout(page)
+        vl.setContentsMargins(0, 6, 0, 6)
+        vl.setSpacing(6)
+
+        vl.addWidget(self._lbl("Group A", size=11, color="#6272a4"))
+        self._spm_group_a_combo = QComboBox()
+        self._style_combo(self._spm_group_a_combo)
+        self._spm_group_a_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_cossim_syn_combo(self._spm_group_a_combo, self._spm_syn_a_combo)
+        )
+        vl.addWidget(self._spm_group_a_combo)
+
+        vl.addWidget(self._lbl("Synergy A", size=11, color="#6272a4"))
+        self._spm_syn_a_combo = QComboBox()
+        self._style_combo(self._spm_syn_a_combo)
+        vl.addWidget(self._spm_syn_a_combo)
+
+        vl.addWidget(self._lbl("Group B", size=11, color="#6272a4"))
+        self._spm_group_b_combo = QComboBox()
+        self._style_combo(self._spm_group_b_combo)
+        self._spm_group_b_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_cossim_syn_combo(self._spm_group_b_combo, self._spm_syn_b_combo)
+        )
+        vl.addWidget(self._spm_group_b_combo)
+
+        vl.addWidget(self._lbl("Synergy B", size=11, color="#6272a4"))
+        self._spm_syn_b_combo = QComboBox()
+        self._style_combo(self._spm_syn_b_combo)
+        vl.addWidget(self._spm_syn_b_combo)
+
+        row_alpha = QHBoxLayout()
+        row_alpha.addWidget(self._lbl("Alpha", size=11, color="#6272a4"))
+        self._spm_alpha_spin = QDoubleSpinBox()
+        self._spm_alpha_spin.setRange(0.001, 0.5)
+        self._spm_alpha_spin.setSingleStep(0.01)
+        self._spm_alpha_spin.setDecimals(3)
+        self._spm_alpha_spin.setValue(0.05)
+        row_alpha.addWidget(self._spm_alpha_spin)
+        vl.addLayout(row_alpha)
+
+        self._spm_two_tailed_check = QCheckBox("Two-tailed")
+        self._spm_two_tailed_check.setChecked(True)
+        self._spm_two_tailed_check.setStyleSheet("color:#f8f8f2;font-size:12px;")
+        vl.addWidget(self._spm_two_tailed_check)
+
+        note = self._lbl(
+            "Requires Muscle Synergy analysis to have been run first with "
+            "classification enabled. Compares each group's cycle-averaged "
+            "activation pattern (P) via a two-sample SPM{t} test (spm1d) "
+            "-- the same test the reference R/MATLAB workflow uses.",
+            size=10, color="#6272a4",
+        )
+        note.setWordWrap(True)
+        vl.addWidget(note)
+
+        vl.addStretch()
+        return page
+
+    def _refresh_spm_group_combos(self):
+        groups = self._dataset.group_names if self._dataset else []
+        combos = (self._spm_group_a_combo, self._spm_group_b_combo)
+        for i, combo in enumerate(combos):
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(groups)
+            if current in groups:
+                combo.setCurrentText(current)
+            elif i == 1 and len(groups) > 1:
+                # Default Group B to the second loaded group (rather than
+                # mirroring Group A) so a fresh run compares two different
+                # groups by default instead of a group against itself.
+                combo.setCurrentIndex(1)
+            combo.blockSignals(False)
+        self._refresh_cossim_syn_combo(self._spm_group_a_combo, self._spm_syn_a_combo)
+        self._refresh_cossim_syn_combo(self._spm_group_b_combo, self._spm_syn_b_combo)
+
+    def _build_wavelet_params_page(self):
+        """Params for Wavelet Analysis -- a per-trial, per-cycle
+        instantaneous median-frequency curve (Continuous Wavelet Transform,
+        Morlet) for one muscle channel, plus a self-contained "Compare
+        Groups" section (cosine similarity or SPM) so this analysis doesn't
+        need Muscle Synergy's classification step -- a muscle channel's
+        identity is already stable across trials/groups, unlike a synergy
+        label, so within/cross-group comparison works directly on the
+        per-trial curves via synergy.py's *_curves() helpers."""
+        page = QWidget()
+        vl = QVBoxLayout(page)
+        vl.setContentsMargins(0, 6, 0, 6)
+        vl.setSpacing(6)
+
+        vl.addWidget(self._lbl("Muscle", size=11, color="#6272a4"))
+        self._wavelet_channel_combo = QComboBox()
+        self._style_combo(self._wavelet_channel_combo)
+        vl.addWidget(self._wavelet_channel_combo)
+
+        row_freq = QHBoxLayout()
+        col_low = QVBoxLayout()
+        col_low.addWidget(self._lbl("Freq low (Hz)", size=10, color="#6272a4"))
+        self._wavelet_freq_low_spin = QSpinBox()
+        self._wavelet_freq_low_spin.setRange(1, 999)
+        self._wavelet_freq_low_spin.setValue(20)
+        col_low.addWidget(self._wavelet_freq_low_spin)
+        row_freq.addLayout(col_low)
+        col_high = QVBoxLayout()
+        col_high.addWidget(self._lbl("Freq high (Hz)", size=10, color="#6272a4"))
+        self._wavelet_freq_high_spin = QSpinBox()
+        self._wavelet_freq_high_spin.setRange(2, 2000)
+        self._wavelet_freq_high_spin.setValue(450)
+        col_high.addWidget(self._wavelet_freq_high_spin)
+        row_freq.addLayout(col_high)
+        vl.addLayout(row_freq)
+
+        vl.addWidget(self._lbl("Points per cycle (0-100%)", size=11, color="#6272a4"))
+        self._wavelet_npoints_spin = QSpinBox()
+        self._wavelet_npoints_spin.setRange(11, 501)
+        self._wavelet_npoints_spin.setValue(101)
+        vl.addWidget(self._wavelet_npoints_spin)
+
+        note = self._lbl(
+            "Instantaneous median frequency per % of cycle, averaged "
+            "across included cycles -- uses the bandpass-filtered signal "
+            "only (not the enveloped/normalized signal CCI/Synergy use).",
+            size=10, color="#6272a4",
+        )
+        note.setWordWrap(True)
+        vl.addWidget(note)
+
+        vl.addSpacing(6)
+        line = QLabel()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background:#44475a;")
+        vl.addWidget(line)
+
+        vl.addWidget(self._lbl("Compare Groups", bold=True))
+        vl.addWidget(self._lbl("Group A", size=11, color="#6272a4"))
+        self._wavelet_group_a_combo = QComboBox()
+        self._style_combo(self._wavelet_group_a_combo)
+        vl.addWidget(self._wavelet_group_a_combo)
+
+        self._wavelet_cross_check = QCheckBox("Compare across two groups")
+        self._wavelet_cross_check.setStyleSheet("color:#f8f8f2;font-size:12px;")
+        self._wavelet_cross_check.stateChanged.connect(self._on_wavelet_cross_toggled)
+        vl.addWidget(self._wavelet_cross_check)
+
+        self._wavelet_group_b_label = self._lbl("Group B", size=11, color="#6272a4")
+        vl.addWidget(self._wavelet_group_b_label)
+        self._wavelet_group_b_combo = QComboBox()
+        self._style_combo(self._wavelet_group_b_combo)
+        vl.addWidget(self._wavelet_group_b_combo)
+        self._wavelet_group_b_label.setVisible(False)
+        self._wavelet_group_b_combo.setVisible(False)
+
+        vl.addWidget(self._lbl("Method", size=11, color="#6272a4"))
+        self._wavelet_method_combo = QComboBox()
+        self._wavelet_method_combo.addItems(["Cosine Similarity", "SPM"])
+        self._style_combo(self._wavelet_method_combo)
+        self._wavelet_method_combo.currentIndexChanged.connect(self._on_wavelet_method_changed)
+        vl.addWidget(self._wavelet_method_combo)
+
+        self._btn_wavelet_compare = QPushButton("Compare Groups")
+        self._style_button(self._btn_wavelet_compare)
+        self._btn_wavelet_compare.clicked.connect(self._run_wavelet_compare)
+        vl.addWidget(self._btn_wavelet_compare)
+
+        compare_note = self._lbl(
+            "Requires Wavelet Analysis to have been run first (Run "
+            "Analysis, above) -- SPM always needs two groups.",
+            size=10, color="#6272a4",
+        )
+        compare_note.setWordWrap(True)
+        vl.addWidget(compare_note)
+
+        vl.addStretch()
+        return page
+
+    def _on_wavelet_cross_toggled(self, _state):
+        show = self._wavelet_cross_check.isChecked()
+        self._wavelet_group_b_label.setVisible(show)
+        self._wavelet_group_b_combo.setVisible(show)
+
+    def _on_wavelet_method_changed(self, _idx):
+        # SPM always compares two groups -- comparing a group to itself
+        # isn't a meaningful hypothesis test, so force+lock the checkbox
+        # rather than let the user hit an avoidable error at Compare time.
+        is_spm = self._wavelet_method_combo.currentText() == "SPM"
+        if is_spm:
+            self._wavelet_cross_check.setChecked(True)
+        self._wavelet_cross_check.setEnabled(not is_spm)
+
+    def _refresh_wavelet_group_combos(self):
+        groups = self._dataset.group_names if self._dataset else []
+        combos = (self._wavelet_group_a_combo, self._wavelet_group_b_combo)
+        for i, combo in enumerate(combos):
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(groups)
+            if current in groups:
+                combo.setCurrentText(current)
+            elif i == 1 and len(groups) > 1:
+                combo.setCurrentIndex(1)
+            combo.blockSignals(False)
+
+    def _wavelet_curves_for_group(self, group_name):
+        names = {t.name for t in self._dataset.trials_in(group_name)}
+        return {n: c for n, c in self._wavelet_results.items() if n in names}
+
     def _build_right_panel(self):
         panel = QWidget()
         panel.setStyleSheet("background:#282a36;")
@@ -675,6 +1087,14 @@ class AdvancedAnalysisWidget(QWidget):
         vl.setSpacing(8)
 
         top = QHBoxLayout()
+        top.addWidget(self._lbl("Group:"))
+        self._group_filter_combo = QComboBox()
+        self._group_filter_combo.setMinimumWidth(100)
+        self._style_combo(self._group_filter_combo)
+        self._group_filter_combo.addItem(ALL_GROUPS_LABEL)
+        self._group_filter_combo.currentIndexChanged.connect(self._on_group_filter_changed)
+        top.addWidget(self._group_filter_combo)
+
         top.addWidget(self._lbl("Participant:"))
         self._trial_combo = QComboBox()
         self._trial_combo.setMinimumWidth(140)
@@ -744,6 +1164,7 @@ class AdvancedAnalysisWidget(QWidget):
             self._cycles_path = path
             self._cycles_path_label.setText(os.path.basename(path.rstrip("/\\")) or path)
             self._cycles_path_label.setToolTip(path)
+            self._maybe_autofill_group_name(path)
 
     def _browse_emg_folder(self):
         path = QFileDialog.getExistingDirectory(self, "Select emg/ folder")
@@ -751,11 +1172,26 @@ class AdvancedAnalysisWidget(QWidget):
             self._emg_path = path
             self._emg_path_label.setText(os.path.basename(path.rstrip("/\\")) or path)
             self._emg_path_label.setToolTip(path)
+            self._maybe_autofill_group_name(path)
 
-    def _load_external_folder(self):
+    def _maybe_autofill_group_name(self, folder_path):
+        """Suggest a group name from the selected folder's parent directory
+        (e.g. picking .../Control/emg suggests "Control") -- only when the
+        field is still empty, so it never clobbers a name the user typed."""
+        if self._group_name_edit.text().strip():
+            return
+        parent_name = os.path.basename(os.path.dirname(folder_path.rstrip("/\\")))
+        if parent_name:
+            self._group_name_edit.setText(parent_name)
+
+    def _add_group_from_paths(self):
+        """Load one emg/+cycles/ folder pair as one comparison group,
+        appending it to whatever is already loaded (or starting a fresh
+        dataset if nothing is loaded yet). Repeatable -- there's no cap on
+        how many groups can be added this way."""
         if not self._cycles_path or not self._emg_path:
             QMessageBox.information(
-                self, "Load Folder Pair", "Select both the cycles/ and emg/ folders first."
+                self, "Add Group", "Select both the cycles/ and emg/ folders first."
             )
             return
 
@@ -767,28 +1203,147 @@ class AdvancedAnalysisWidget(QWidget):
             )
             return
 
+        existing_groups = self._dataset.group_names if self._dataset else []
+        group_name = self._group_name_edit.text().strip() or f"Group {len(existing_groups) + 1}"
+
         try:
-            dataset = load_external_folder(self._cycles_path, self._emg_path, cycle_mode="discrete")
+            dataset = load_external_folder(
+                self._cycles_path, self._emg_path, cycle_mode="discrete",
+                group=group_name, dataset=self._dataset,
+            )
         except Exception as e:
             QMessageBox.critical(self, "Load Failed", str(e))
             return
 
-        self._dataset = dataset
-        self._prepared_cache.clear()
-        self._cci_results.clear()
-        self._synergy_results.clear()
-        self._synergy_classified.clear()
+        self._on_dataset_loaded(dataset)
+
+        self._cycles_path = None
+        self._emg_path = None
+        self._cycles_path_label.setText("(not set)")
+        self._cycles_path_label.setToolTip("")
+        self._emg_path_label.setText("(not set)")
+        self._emg_path_label.setToolTip("")
+        self._group_name_edit.clear()
+
+    def _load_parent_groups_folder(self):
+        """Bulk-load every group found directly under one parent folder
+        (one subfolder per group, each with its own emg/+cycles/), replacing
+        whatever is currently loaded -- matches this project's sample data
+        layout (e.g. Adv_Analyses/Control, Adv_Analyses/LBP)."""
+        if self._cycle_mode_combo.currentIndex() == 1:
+            QMessageBox.information(
+                self, "Not Implemented",
+                "Continuous gait-cycle folders are not supported yet -- only "
+                "discrete-repetition (start, end) cycle files are implemented.",
+            )
+            return
+
+        parent = QFileDialog.getExistingDirectory(
+            self, "Select parent folder (one subfolder per group, each with emg/ + cycles/)"
+        )
+        if not parent:
+            return
+
+        try:
+            dataset = load_external_groups(parent, cycle_mode="discrete")
+        except Exception as e:
+            QMessageBox.critical(self, "Load Failed", str(e))
+            return
+
+        self._on_dataset_loaded(dataset)
+
+    def _clear_all_groups(self):
+        self._on_dataset_loaded(None)
+
+    def _refresh_groups_list(self):
+        self._groups_list.clear()
+        if self._dataset is None:
+            return
+        for group_name in self._dataset.group_names:
+            n = len(self._dataset.trials_in(group_name))
+            self._groups_list.addItem(f"{group_name}  ({n} participant{'s' if n != 1 else ''})")
+
+    def _refresh_group_filter_combo(self):
+        self._group_filter_combo.blockSignals(True)
+        self._group_filter_combo.clear()
+        self._group_filter_combo.addItem(ALL_GROUPS_LABEL)
+        if self._dataset is not None:
+            self._group_filter_combo.addItems(self._dataset.group_names)
+        self._group_filter_combo.setCurrentIndex(0)
+        self._group_filter_combo.blockSignals(False)
+
+    def _refresh_trial_combo(self):
+        """Populate the Participant combo from whichever group is selected
+        in the Group filter (or every participant, for the default "All
+        Groups" entry)."""
+        group_filter = self._group_filter_combo.currentText()
+        if self._dataset is None:
+            names = []
+        elif group_filter and group_filter != ALL_GROUPS_LABEL:
+            names = [t.name for t in self._dataset.trials_in(group_filter)]
+        else:
+            names = self._dataset.names
 
         self._trial_combo.blockSignals(True)
         self._trial_combo.clear()
-        self._trial_combo.addItems(dataset.names)
+        self._trial_combo.addItems(names)
         self._trial_combo.blockSignals(False)
-        self._refresh_rep_combo()
         self._sync_group_summary_option()
+        self._sync_wavelet_compare_option()
+        self._refresh_rep_combo()
+
+    def _on_group_filter_changed(self, _idx):
+        self._refresh_trial_combo()
+        self._update_chart()
+
+    def _on_dataset_loaded(self, dataset):
+        """Common bookkeeping after (re)loading, adding to, or clearing the
+        dataset -- any change invalidates cached preprocessing/results since
+        cycle/rep composition may have changed."""
+        self._dataset = dataset
+        self._prepared_cache.clear()
+        self._wavelet_prepared_cache.clear()
+        self._cci_results.clear()
+        self._synergy_results.clear()
+        self._synergy_classified.clear()
+        self._cossim_result = None
+        self._cossim_title = ""
+        self._spm_result = None
+        self._spm_title = ""
+        self._wavelet_results.clear()
+        self._wavelet_channel = None
+        self._wavelet_n_points = None
+        self._wavelet_compare_result = None
+        self._wavelet_compare_kind = None
+        self._wavelet_compare_title = ""
+
+        self._refresh_groups_list()
+        self._refresh_group_filter_combo()
+        self._refresh_cossim_group_combos()
+        self._refresh_spm_group_combos()
+        self._refresh_wavelet_group_combos()
+
+        if dataset is None or len(dataset) == 0:
+            self._trial_combo.blockSignals(True)
+            self._trial_combo.clear()
+            self._trial_combo.blockSignals(False)
+            for combo in (self._cci_muscle_a, self._cci_muscle_b, self._wavelet_channel_combo):
+                combo.blockSignals(True)
+                combo.clear()
+                combo.blockSignals(False)
+            self._status_label.setText("No data loaded.")
+            self._cycle_range_note.setText("")
+            self._btn_run.setEnabled(False)
+            self._chart_view.show_placeholder("Load a data source, then run an analysis.")
+            self._result_table.setRowCount(0)
+            self._result_table.setColumnCount(0)
+            return
+
+        self._refresh_trial_combo()
 
         first_trial = dataset[dataset.names[0]]
         muscles = first_trial.emg.labels
-        for combo in (self._cci_muscle_a, self._cci_muscle_b):
+        for combo in (self._cci_muscle_a, self._cci_muscle_b, self._wavelet_channel_combo):
             combo.blockSignals(True)
             combo.clear()
             combo.addItems(muscles)
@@ -796,8 +1351,10 @@ class AdvancedAnalysisWidget(QWidget):
         if len(muscles) > 1:
             self._cci_muscle_b.setCurrentIndex(1)
 
+        n_groups = len(dataset.group_names)
+        group_note = f" across {n_groups} group(s)" if n_groups > 1 else ""
         self._status_label.setText(
-            f"Loaded {len(dataset)} trial(s), {len(muscles)} channel(s) each."
+            f"Loaded {len(dataset)} trial(s){group_note}, {len(muscles)} channel(s) each."
         )
 
         cycle_counts = [len(t.cycles) for t in dataset]
@@ -830,14 +1387,51 @@ class AdvancedAnalysisWidget(QWidget):
         self._result_table.setColumnCount(0)
         self._refresh_rep_combo()
         self._sync_group_summary_option()
+        self._sync_wavelet_compare_option()
         self._style_axis_stack.setCurrentIndex(1 if idx == 1 else 0)
+        if idx == 2:
+            self._refresh_cossim_group_combos()
+        elif idx == 3:
+            self._refresh_wavelet_group_combos()
+        elif idx == 4:
+            self._refresh_spm_group_combos()
         self._update_chart()
+
+    def _active_group_for_summary(self):
+        """Which comparison group the synthetic "Group Summary" entry
+        should summarize -- Synergy classification runs independently per
+        group (see _run_synergy), so averaging across groups would silently
+        mix unrelated synergy labels; Wavelet has no classification step,
+        but a single group-mean curve across groups would still hide
+        exactly the group difference the user loaded multiple groups to
+        see, so the same one-group-at-a-time rule applies to it too.
+        Resolves to the Group filter's current selection; None (summary
+        hidden) if "All Groups" is selected while more than one group is
+        loaded, since there's no single group to summarize in that case.
+        With zero or one group loaded (including the legacy single-folder/
+        workspace path), the filter is irrelevant and this just resolves to
+        that one group."""
+        if self._dataset is None:
+            return None
+        groups = self._dataset.group_names
+        if len(groups) <= 1:
+            return groups[0] if groups else None
+        current = self._group_filter_combo.currentText()
+        return current if current and current != ALL_GROUPS_LABEL else None
 
     def _sync_group_summary_option(self):
         """Add/remove the synthetic "Group Summary" entry from the
-        Participant combo -- only shown for Synergy analysis once a
-        classified batch result actually exists."""
-        show_group = self._analysis_combo.currentIndex() == 1 and bool(self._synergy_classified)
+        Participant combo -- shown for Synergy once a classified result
+        exists, or for Wavelet once a wavelet run exists, for the currently
+        active group (see _active_group_for_summary)."""
+        analysis_idx = self._analysis_combo.currentIndex()
+        if analysis_idx == 1:
+            has_results = bool(self._synergy_classified)
+        elif analysis_idx == 3:
+            has_results = bool(self._wavelet_results)
+        else:
+            has_results = False
+        show_group = has_results and self._active_group_for_summary() is not None
         idx = self._trial_combo.findText(GROUP_SUMMARY_LABEL)
         if show_group and idx < 0:
             self._trial_combo.blockSignals(True)
@@ -845,6 +1439,31 @@ class AdvancedAnalysisWidget(QWidget):
             self._trial_combo.setCurrentIndex(0)
             self._trial_combo.blockSignals(False)
         elif not show_group and idx >= 0:
+            self._trial_combo.blockSignals(True)
+            self._trial_combo.removeItem(idx)
+            if self._trial_combo.count() > 0:
+                self._trial_combo.setCurrentIndex(0)
+            self._trial_combo.blockSignals(False)
+
+    def _sync_wavelet_compare_option(self):
+        """Add/remove the synthetic "Group Comparison" entry from the
+        Participant combo -- shown for Wavelet Analysis once a "Compare
+        Groups" run has produced a result. Inserted after
+        _sync_group_summary_option so, when both are present, Group
+        Comparison sits above Group Summary (both insert at index 0;
+        calling this second puts it on top) -- consistent ordering rather
+        than depending on call order elsewhere."""
+        show = (
+            self._analysis_combo.currentIndex() == 3
+            and self._wavelet_compare_result is not None
+        )
+        idx = self._trial_combo.findText(WAVELET_COMPARE_LABEL)
+        if show and idx < 0:
+            self._trial_combo.blockSignals(True)
+            self._trial_combo.insertItem(0, WAVELET_COMPARE_LABEL)
+            self._trial_combo.setCurrentIndex(0)
+            self._trial_combo.blockSignals(False)
+        elif not show and idx >= 0:
             self._trial_combo.blockSignals(True)
             self._trial_combo.removeItem(idx)
             if self._trial_combo.count() > 0:
@@ -879,6 +1498,31 @@ class AdvancedAnalysisWidget(QWidget):
             )
         return subset
 
+    def _get_wavelet_prepared(self, trial, freq_low, freq_high):
+        """Bandpass-filtered-only trial for Wavelet Analysis -- deliberately
+        NOT prepare_synergy_input's enveloped/normalized signal (frequency-
+        domain analysis must stay off that path). Cached separately from
+        _prepared_cache, keyed also on the freq range since that changes
+        the filter."""
+        cache_key = (trial.name, freq_low, freq_high)
+        if cache_key not in self._wavelet_prepared_cache:
+            self._wavelet_prepared_cache[cache_key] = prepare_wavelet_input(
+                trial, bp_low=freq_low, bp_high=freq_high,
+            )
+        return self._wavelet_prepared_cache[cache_key]
+
+    def _get_wavelet_prepared_subset(self, trial, freq_low, freq_high):
+        prepared = self._get_wavelet_prepared(trial, freq_low, freq_high)
+        cy_start = self._cycle_start_spin.value()
+        cy_max = self._cycle_max_spin.value()  # 0 == "All"
+        subset = subset_cycles(prepared, cy_start, cy_max)
+        if len(subset.cycles) == 0:
+            raise ValueError(
+                f"trial '{trial.name}' has no cycles left after applying "
+                f"Start={cy_start}/Max={cy_max or 'All'}"
+            )
+        return subset
+
     # ── run analysis ─────────────────────────────────────────────────────
 
     def _run_analysis(self):
@@ -890,6 +1534,12 @@ class AdvancedAnalysisWidget(QWidget):
             self._run_cci()
         elif analysis_idx == 1:
             self._run_synergy()
+        elif analysis_idx == 2:
+            self._run_cossim()
+        elif analysis_idx == 3:
+            self._run_wavelet()
+        elif analysis_idx == 4:
+            self._run_spm()
         else:
             QMessageBox.information(self, "Not Implemented", "This analysis is not implemented yet.")
 
@@ -964,20 +1614,35 @@ class AdvancedAnalysisWidget(QWidget):
 
         base_status = f"Synergy analysis computed for {len(self._synergy_results)} trial(s)."
         if self._syn_classify_check.isChecked() and len(self._synergy_results) >= 2:
-            self._status_label.setText(base_status + " Classifying across participants...")
+            self._status_label.setText(base_status + " Classifying within each group...")
             QApplication.processEvents()
             try:
                 clusters = self._syn_clusters_spin.value() or None
-                self._synergy_classified = classify_kmeans(
-                    self._synergy_results, n_points=n_points, clusters=clusters,
-                )
+                classified = {}
+                for group_name in self._dataset.group_names:
+                    group_results = {
+                        t.name: self._synergy_results[t.name]
+                        for t in self._dataset.trials_in(group_name)
+                        if t.name in self._synergy_results
+                    }
+                    # Classification needs >= 2 trials to mean anything; a
+                    # group with only one trial (or none run) is left
+                    # unclassified rather than raising.
+                    if len(group_results) < 2:
+                        continue
+                    classified.update(
+                        classify_kmeans(group_results, n_points=n_points, clusters=clusters)
+                    )
+                self._synergy_classified = classified
                 total = sum(r.syns for r in self._synergy_results.values())
                 combined = sum(
                     sum(1 for s in r.syn_names if "combined" in s)
                     for r in self._synergy_classified.values()
                 )
+                n_groups = len(self._dataset.group_names)
+                group_note = f" (per group, {n_groups} group(s))" if n_groups > 1 else ""
                 self._status_label.setText(
-                    f"{base_status} Classified across participants "
+                    f"{base_status} Classified{group_note} "
                     f"({total - combined}/{total} synergies matched, {combined} combined)."
                 )
             except Exception as e:
@@ -994,6 +1659,7 @@ class AdvancedAnalysisWidget(QWidget):
         self._populate_synergy_table()
         self._sync_group_summary_option()
         self._refresh_rep_combo()
+        self._refresh_cossim_group_combos()
         self._update_chart()
 
     def _populate_synergy_table(self):
@@ -1013,6 +1679,262 @@ class AdvancedAnalysisWidget(QWidget):
                 classified = self._synergy_classified.get(name)
                 n_combined = sum(1 for s in classified.syn_names if "combined" in s) if classified else 0
                 self._result_table.setItem(r, 3, QTableWidgetItem(str(n_combined)))
+        self._result_table.resizeColumnsToContents()
+
+    def _run_cossim(self):
+        if not self._synergy_classified:
+            QMessageBox.information(
+                self, "Cosine Similarity",
+                "Run Muscle Synergy analysis with classification enabled first.",
+            )
+            return
+
+        syn_type = "M" if self._cossim_signal_combo.currentIndex() == 0 else "P"
+        group_a = self._cossim_group_a_combo.currentText()
+        syn_a = self._cossim_syn_a_combo.currentText()
+        if not group_a or not syn_a:
+            QMessageBox.information(self, "Cosine Similarity", "Choose Group A and Synergy A.")
+            return
+
+        classified_a = self._classified_for_group(group_a)
+        cross = self._cossim_cross_check.isChecked()
+
+        self._status_label.setText("Computing cosine similarity...")
+        QApplication.processEvents()
+
+        try:
+            if cross:
+                group_b = self._cossim_group_b_combo.currentText()
+                syn_b = self._cossim_syn_b_combo.currentText()
+                if not group_b or not syn_b:
+                    QMessageBox.information(self, "Cosine Similarity", "Choose Group B and Synergy B.")
+                    self._status_label.setText("")
+                    return
+                classified_b = self._classified_for_group(group_b)
+                result = cross_group_cossim(
+                    classified_a, classified_b, syn_a, syn_b,
+                    syn_type=syn_type, n_points=self._synergy_n_points,
+                )
+                title = f"{group_a}/{syn_a} vs {group_b}/{syn_b} ({syn_type}), cross-group"
+            else:
+                result = within_group_cossim(
+                    classified_a, syn_a, syn_type=syn_type, n_points=self._synergy_n_points,
+                )
+                title = f"{group_a}/{syn_a} ({syn_type}), within-group"
+        except Exception as e:
+            QMessageBox.critical(self, "Cosine Similarity Failed", str(e))
+            self._status_label.setText("Cosine similarity failed.")
+            return
+
+        self._cossim_result = result
+        self._cossim_title = title
+        summary = similarity_summary(result)
+        self._populate_cossim_table(result)
+        if summary["n_pairs"]:
+            self._status_label.setText(
+                f"Cosine similarity computed ({title}): mean={summary['mean']:.3f}, "
+                f"sd={summary['sd']:.3f} over {summary['n_pairs']} pair(s)."
+            )
+        else:
+            self._status_label.setText(f"Cosine similarity computed ({title}): no overlapping pairs.")
+        self._update_chart()
+
+    def _populate_cossim_table(self, result):
+        cols = ["Participant"] + result.col_labels
+        self._result_table.setColumnCount(len(cols))
+        self._result_table.setHorizontalHeaderLabels(cols)
+        self._result_table.setRowCount(len(result.row_labels))
+        for r, row_label in enumerate(result.row_labels):
+            self._result_table.setItem(r, 0, QTableWidgetItem(row_label))
+            for c in range(len(result.col_labels)):
+                val = result.matrix[r, c]
+                text = "" if np.isnan(val) else f"{val:.3f}"
+                self._result_table.setItem(r, c + 1, QTableWidgetItem(text))
+        self._result_table.resizeColumnsToContents()
+
+    def _run_wavelet(self):
+        channel = self._wavelet_channel_combo.currentText()
+        if not channel:
+            QMessageBox.information(self, "Wavelet Analysis", "Choose a muscle channel.")
+            return
+        freq_low = self._wavelet_freq_low_spin.value()
+        freq_high = self._wavelet_freq_high_spin.value()
+        if freq_low >= freq_high:
+            QMessageBox.information(self, "Wavelet Analysis", "Freq low must be less than Freq high.")
+            return
+        n_points = self._wavelet_npoints_spin.value()
+
+        self._status_label.setText("Running wavelet analysis (this can take a while)...")
+        QApplication.processEvents()
+
+        self._wavelet_results.clear()
+        self._wavelet_compare_result = None
+        self._wavelet_compare_kind = None
+        try:
+            for trial in self._dataset:
+                prepared = self._get_wavelet_prepared_subset(trial, freq_low, freq_high)
+                curve = wavelet_medfreq_curve(
+                    prepared, channel, n_points=n_points, freq_low=freq_low, freq_high=freq_high,
+                )
+                self._wavelet_results[trial.name] = curve
+                self._status_label.setText(f"Wavelet analysis: {trial.name} done.")
+                QApplication.processEvents()
+        except Exception as e:
+            QMessageBox.critical(self, "Wavelet Analysis Failed", str(e))
+            self._status_label.setText("Wavelet analysis failed.")
+            return
+
+        self._wavelet_channel = channel
+        self._wavelet_n_points = n_points
+        self._status_label.setText(f"Wavelet analysis computed for {len(self._wavelet_results)} trial(s).")
+        self._populate_wavelet_table()
+        self._sync_group_summary_option()
+        self._sync_wavelet_compare_option()
+        self._refresh_rep_combo()
+        self._update_chart()
+
+    def _populate_wavelet_table(self):
+        cols = ["Trial", "Mean median freq (Hz)"]
+        self._result_table.setColumnCount(len(cols))
+        self._result_table.setHorizontalHeaderLabels(cols)
+        names = sorted(self._wavelet_results.keys())
+        self._result_table.setRowCount(len(names))
+        for r, name in enumerate(names):
+            curve = self._wavelet_results[name]
+            self._result_table.setItem(r, 0, QTableWidgetItem(name))
+            self._result_table.setItem(r, 1, QTableWidgetItem(f"{curve.mean():.2f}"))
+        self._result_table.resizeColumnsToContents()
+
+    def _run_wavelet_compare(self):
+        if not self._wavelet_results:
+            QMessageBox.information(self, "Compare Groups", "Run Wavelet Analysis first.")
+            return
+
+        group_a = self._wavelet_group_a_combo.currentText()
+        if not group_a:
+            QMessageBox.information(self, "Compare Groups", "Choose Group A.")
+            return
+        curves_a = self._wavelet_curves_for_group(group_a)
+        if len(curves_a) < 2:
+            QMessageBox.information(
+                self, "Compare Groups",
+                f"Group '{group_a}' needs at least 2 trials with wavelet results.",
+            )
+            return
+
+        method = self._wavelet_method_combo.currentText()
+        cross = self._wavelet_cross_check.isChecked()
+
+        self._status_label.setText("Computing group comparison...")
+        QApplication.processEvents()
+        try:
+            if cross:
+                group_b = self._wavelet_group_b_combo.currentText()
+                if not group_b:
+                    QMessageBox.information(self, "Compare Groups", "Choose Group B.")
+                    self._status_label.setText("")
+                    return
+                curves_b = self._wavelet_curves_for_group(group_b)
+                if len(curves_b) < 2:
+                    QMessageBox.information(
+                        self, "Compare Groups",
+                        f"Group '{group_b}' needs at least 2 trials with wavelet results.",
+                    )
+                    self._status_label.setText("")
+                    return
+                if method == "SPM":
+                    result = spm_compare_curves(curves_a, curves_b)
+                    kind = "spm"
+                else:
+                    result = cross_group_cossim_curves(curves_a, curves_b)
+                    kind = "cossim"
+                title = f"{group_a} vs {group_b} ({self._wavelet_channel}), cross-group"
+            else:
+                if method == "SPM":
+                    QMessageBox.information(
+                        self, "Compare Groups",
+                        "SPM requires two groups -- check 'Compare across two groups'.",
+                    )
+                    self._status_label.setText("")
+                    return
+                result = within_group_cossim_curves(curves_a)
+                kind = "cossim"
+                title = f"{group_a} ({self._wavelet_channel}), within-group"
+        except Exception as e:
+            QMessageBox.critical(self, "Compare Groups Failed", str(e))
+            self._status_label.setText("Group comparison failed.")
+            return
+
+        self._wavelet_compare_result = result
+        self._wavelet_compare_kind = kind
+        self._wavelet_compare_title = title
+        if kind == "cossim":
+            summary = similarity_summary(result)
+            self._populate_cossim_table(result)
+            if summary["n_pairs"]:
+                self._status_label.setText(
+                    f"Comparison computed ({title}): mean={summary['mean']:.3f}, "
+                    f"sd={summary['sd']:.3f} over {summary['n_pairs']} pair(s)."
+                )
+            else:
+                self._status_label.setText(f"Comparison computed ({title}): no overlapping pairs.")
+        else:
+            self._populate_spm_table(result)
+            verdict = "significant difference detected" if result.h0reject else "no significant difference"
+            self._status_label.setText(f"Comparison computed ({title}): {verdict}.")
+
+        self._sync_wavelet_compare_option()
+        self._update_chart()
+
+    def _run_spm(self):
+        if not self._synergy_classified:
+            QMessageBox.information(
+                self, "SPM",
+                "Run Muscle Synergy analysis with classification enabled first.",
+            )
+            return
+
+        group_a = self._spm_group_a_combo.currentText()
+        syn_a = self._spm_syn_a_combo.currentText()
+        group_b = self._spm_group_b_combo.currentText()
+        syn_b = self._spm_syn_b_combo.currentText()
+        if not all((group_a, syn_a, group_b, syn_b)):
+            QMessageBox.information(self, "SPM", "Choose Group A/Synergy A and Group B/Synergy B.")
+            return
+
+        alpha = self._spm_alpha_spin.value()
+        two_tailed = self._spm_two_tailed_check.isChecked()
+        classified_a = self._classified_for_group(group_a)
+        classified_b = self._classified_for_group(group_b)
+
+        self._status_label.setText("Running SPM (two-sample t-test)...")
+        QApplication.processEvents()
+        try:
+            result = spm_compare(
+                classified_a, classified_b, syn_a, syn_b,
+                n_points=self._synergy_n_points, alpha=alpha, two_tailed=two_tailed,
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "SPM Failed", str(e))
+            self._status_label.setText("SPM failed.")
+            return
+
+        self._spm_result = result
+        self._spm_title = f"{group_a}/{syn_a} (n={result.n_a}) vs {group_b}/{syn_b} (n={result.n_b})"
+        self._populate_spm_table(result)
+        verdict = "significant difference detected" if result.h0reject else "no significant difference"
+        self._status_label.setText(f"SPM computed ({self._spm_title}): {verdict} (alpha={alpha}).")
+        self._update_chart()
+
+    def _populate_spm_table(self, result):
+        cols = ["Cluster start (%)", "Cluster end (%)", "p-value"]
+        self._result_table.setColumnCount(len(cols))
+        self._result_table.setHorizontalHeaderLabels(cols)
+        self._result_table.setRowCount(len(result.clusters))
+        for r, (start, end, p) in enumerate(result.clusters):
+            self._result_table.setItem(r, 0, QTableWidgetItem(f"{start:.1f}"))
+            self._result_table.setItem(r, 1, QTableWidgetItem(f"{end:.1f}"))
+            self._result_table.setItem(r, 2, QTableWidgetItem(f"{p:.4f}"))
         self._result_table.resizeColumnsToContents()
 
     # ── chart ────────────────────────────────────────────────────────────
@@ -1061,19 +1983,37 @@ class AdvancedAnalysisWidget(QWidget):
         self._refresh_series_swatches([])
 
     def _update_chart(self):
+        analysis_idx = self._analysis_combo.currentIndex()
+        if analysis_idx == 2:
+            # Cosine Similarity is a group-level comparison, not tied to
+            # whichever participant happens to be selected in the
+            # Participant combo -- render it regardless of that selection.
+            self._show_cossim_chart()
+            return
+        if analysis_idx == 4:
+            # SPM is likewise a two-group comparison, independent of the
+            # Participant combo's selection.
+            self._show_spm_chart()
+            return
+
         trial_name = self._trial_combo.currentText()
         if not trial_name:
             self._chart_view.show_placeholder("Load a data source first.")
             self._refresh_series_swatches([])
             return
 
-        analysis_idx = self._analysis_combo.currentIndex()
         if analysis_idx == 0 and trial_name in self._cci_results:
             self._show_cci_chart(trial_name)
         elif analysis_idx == 1 and trial_name == GROUP_SUMMARY_LABEL and self._synergy_classified:
             self._show_group_synergy_chart()
         elif analysis_idx == 1 and trial_name in self._synergy_results:
             self._show_synergy_chart(trial_name)
+        elif analysis_idx == 3 and trial_name == WAVELET_COMPARE_LABEL and self._wavelet_compare_result is not None:
+            self._show_wavelet_compare_chart()
+        elif analysis_idx == 3 and trial_name == GROUP_SUMMARY_LABEL and self._wavelet_results:
+            self._show_wavelet_group_chart()
+        elif analysis_idx == 3 and trial_name in self._wavelet_results:
+            self._show_wavelet_chart(trial_name)
         else:
             self._chart_view.show_placeholder("Run an analysis to see results here.")
             self._refresh_series_swatches([])
@@ -1239,12 +2179,23 @@ class AdvancedAnalysisWidget(QWidget):
         """Group-level consensus plot: mean muscle weighting + mean activation
         pattern per classified synergy label, averaged across every
         participant that contributed a (non-"combined") instance of it --
-        the "what does Syn1 look like across the whole cohort" view."""
+        the "what does Syn1 look like across this cohort" view.
+
+        Scoped to one comparison group (see _active_group_for_summary) --
+        classification runs independently per group, so a synergy label
+        only means the same thing within one group, never across groups."""
+        active_group = self._active_group_for_summary()
+        classified_subset = {
+            t.name: self._synergy_classified[t.name]
+            for t in self._dataset.trials_in(active_group)
+            if t.name in self._synergy_classified
+        } if active_group else {}
+
         n_points = self._syn_npoints_spin.value()
-        summary = group_synergy_summary(self._synergy_classified, n_points)
+        summary = group_synergy_summary(classified_subset, n_points)
         if not summary:
             self._chart_view.show_placeholder(
-                "No consistently-classified synergies to summarize across participants."
+                "No consistently-classified synergies to summarize for this group."
             )
             self._refresh_series_swatches([])
             return
@@ -1296,17 +2247,223 @@ class AdvancedAnalysisWidget(QWidget):
                 legendgroup=group_id, showlegend=False,
             ), row=1, col=2)
 
-        total_trials = len(self._synergy_classified)
+        total_trials = len(classified_subset)
+        group_suffix = f" ({active_group})" if len(self._dataset.group_names) > 1 else ""
         st = self._chart_style
         self._apply_common_style(
             fig,
-            default_title=f"Group synergy summary — {total_trials} participant(s), {len(labels)} synergies",
+            default_title=f"Group synergy summary{group_suffix} — {total_trials} participant(s), {len(labels)} synergies",
             xaxis_title=st["syn_weight_xlabel"] or None,
             yaxis_title=st["syn_weight_ylabel"] or "Weighting (a.u.)",
             xaxis2_title=st["syn_activation_xlabel"] or "sample (normalized cycle)",
             yaxis2_title=st["syn_activation_ylabel"] or "Activation (a.u.)",
         )
         self._chart_view.show_figure(fig, filename_stem="group_synergy_summary")
+
+    def _show_wavelet_chart(self, trial_name):
+        curve = self._wavelet_results[trial_name]
+        st = self._chart_style
+        dash = None if st["line_dash"] == "solid" else st["line_dash"]
+        label = self._wavelet_channel
+        self._refresh_series_swatches([label])
+        color = self._series_color(label, 0)
+        x = np.arange(len(curve))
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=x, y=curve, mode="lines", name=label,
+            line=dict(color=color, width=2, dash=dash),
+        ))
+        self._apply_common_style(
+            fig,
+            default_title=f"Wavelet median frequency — {trial_name} ({label})",
+            xaxis_title=st["xlabel"] or "sample (normalized cycle)",
+            yaxis_title=st["ylabel"] or "Median frequency (Hz)",
+        )
+        self._chart_view.show_figure(fig, filename_stem=f"{trial_name}_wavelet")
+
+    def _show_wavelet_group_chart(self):
+        """Group-level consensus plot: mean +/- SD instantaneous
+        median-frequency curve across every trial in the active group (see
+        _active_group_for_summary) -- simpler than Synergy's group summary
+        since there's no per-label dimension, just one curve per trial."""
+        active_group = self._active_group_for_summary()
+        curves = [
+            self._wavelet_results[t.name]
+            for t in self._dataset.trials_in(active_group)
+            if t.name in self._wavelet_results
+        ] if active_group else []
+        if not curves:
+            self._chart_view.show_placeholder("No wavelet results for this group.")
+            self._refresh_series_swatches([])
+            return
+
+        arr = np.array(curves)
+        mean = arr.mean(axis=0)
+        sd = arr.std(axis=0, ddof=1) if len(curves) > 1 else np.zeros_like(mean)
+
+        st = self._chart_style
+        dash = None if st["line_dash"] == "solid" else st["line_dash"]
+        label = self._wavelet_channel
+        self._refresh_series_swatches([label])
+        color = self._series_color(label, 0)
+        x = np.arange(len(mean))
+        upper, lower = mean + sd, mean - sd
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=x, y=upper, mode="lines", line=dict(width=0),
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=x, y=lower, mode="lines", line=dict(width=0),
+            fill="tonexty", fillcolor=self._hex_to_rgba(color, 0.25),
+            showlegend=False, hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=x, y=mean, mode="lines", name=f"{label} (n={len(curves)})",
+            line=dict(color=color, dash=dash),
+        ))
+
+        group_suffix = f" ({active_group})" if len(self._dataset.group_names) > 1 else ""
+        self._apply_common_style(
+            fig,
+            default_title=f"Wavelet group summary{group_suffix} — {len(curves)} participant(s), {label}",
+            xaxis_title=st["xlabel"] or "sample (normalized cycle)",
+            yaxis_title=st["ylabel"] or "Median frequency (Hz)",
+        )
+        self._chart_view.show_figure(fig, filename_stem="wavelet_group_summary")
+
+    def _show_wavelet_compare_chart(self):
+        """Dispatches to whichever render helper matches the last "Compare
+        Groups" run's method -- the same heatmap/SPM panel Cosine
+        Similarity/SPM (Synergy) use, since within_group_cossim_curves/
+        cross_group_cossim_curves/spm_compare_curves return the same
+        SimilarityMatrix/SPMResult shapes."""
+        if self._wavelet_compare_kind == "spm":
+            self._render_spm_chart(self._wavelet_compare_result, self._wavelet_compare_title)
+        else:
+            self._render_cossim_heatmap(self._wavelet_compare_result, self._wavelet_compare_title)
+
+    def _show_cossim_chart(self):
+        if self._cossim_result is None:
+            self._chart_view.show_placeholder(
+                "Choose group(s)/synergy signal, then click Run Analysis."
+            )
+            self._refresh_series_swatches([])
+            return
+        self._render_cossim_heatmap(self._cossim_result, self._cossim_title)
+
+    def _render_cossim_heatmap(self, result, title):
+        """Heatmap of a within-/cross-group cosine-similarity result --
+        Plotly equivalent of the R reference scripts' ggplot geom_tile
+        heatmap (R/plot_similarity_heatmaps.R), including the same
+        mean/mean+1SD threshold suggestion the R script prints. Shared by
+        Cosine Similarity (Synergy) and Wavelet's own group comparison,
+        which both produce the same SimilarityMatrix shape."""
+        z = result.matrix
+        text = [[("" if np.isnan(v) else f"{v:.2f}") for v in row] for row in z]
+        fig = go.Figure(data=go.Heatmap(
+            z=z, x=result.col_labels, y=result.row_labels,
+            zmin=-1, zmax=1, zmid=0,
+            colorscale=[[0, "#3d5afe"], [0.5, "#f8f8f2"], [1, "#ff5555"]],
+            text=text, texttemplate="%{text}",
+            colorbar=dict(title="cos sim"),
+        ))
+        fig.update_yaxes(autorange="reversed")  # first participant at the top, matching the table
+
+        summary = similarity_summary(result)
+        subtitle = (
+            f" (mean={summary['mean']:.2f}, mean+1sd={summary['threshold']:.2f})"
+            if summary["n_pairs"] else " (no overlapping pairs)"
+        )
+        self._refresh_series_swatches([])
+        st = self._chart_style
+        self._apply_common_style(
+            fig,
+            default_title=f"Cosine similarity — {title}{subtitle}",
+            xaxis_title=st["xlabel"] or "Participant",
+            yaxis_title=st["ylabel"] or "Participant",
+        )
+        self._chart_view.show_figure(fig, filename_stem="cosine_similarity")
+
+    def _show_spm_chart(self):
+        if self._spm_result is None:
+            self._chart_view.show_placeholder(
+                "Choose Group A/B and Synergy A/B, then click Run Analysis."
+            )
+            self._refresh_series_swatches([])
+            return
+        self._render_spm_chart(self._spm_result, self._spm_title)
+
+    def _render_spm_chart(self, result, title):
+        """Two-panel SPM view -- mean +/- SD curve per group (spm1d's
+        plot_meanSD equivalent) alongside the SPM{t} statistic curve with
+        its RFT threshold and shaded significant cluster(s) (spmi.plot() +
+        plot_threshold_label() + plot_p_values() equivalent), matching this
+        project's R/MATLAB reference (MS_SPM.m). Shared by SPM (Synergy)
+        and Wavelet's own group comparison, which both produce the same
+        SPMResult shape."""
+        st = self._chart_style
+        dash = None if st["line_dash"] == "solid" else st["line_dash"]
+        labels = ["Group A", "Group B"]
+        self._refresh_series_swatches(labels)
+        color_a = self._series_color(labels[0], 0)
+        color_b = self._series_color(labels[1], 1)
+
+        n_points = len(result.mean_a)
+        x = np.arange(n_points)
+
+        fig = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=("Mean activation pattern (P) ± SD", f"SPM{{t}} (alpha={result.alpha})"),
+        )
+
+        for mean, sd, color, label, n in (
+            (result.mean_a, result.sd_a, color_a, labels[0], result.n_a),
+            (result.mean_b, result.sd_b, color_b, labels[1], result.n_b),
+        ):
+            upper, lower = mean + sd, mean - sd
+            group_id = f"spm_{label}"
+            fig.add_trace(go.Scatter(
+                x=x, y=upper, mode="lines", line=dict(width=0),
+                legendgroup=group_id, showlegend=False, hoverinfo="skip",
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=x, y=lower, mode="lines", line=dict(width=0),
+                fill="tonexty", fillcolor=self._hex_to_rgba(color, 0.25),
+                legendgroup=group_id, showlegend=False, hoverinfo="skip",
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=x, y=mean, mode="lines", name=f"{label} (n={n})",
+                line=dict(color=color, dash=dash),
+                legendgroup=group_id, showlegend=True,
+            ), row=1, col=1)
+
+        z_x = np.linspace(0, n_points - 1, len(result.z))
+        fig.add_trace(go.Scatter(
+            x=z_x, y=result.z, mode="lines", name="SPM{t}",
+            line=dict(color="#f8f8f2", width=2), showlegend=False,
+        ), row=1, col=2)
+        for bound in (result.zstar, -result.zstar):
+            fig.add_trace(go.Scatter(
+                x=[z_x[0], z_x[-1]], y=[bound, bound], mode="lines",
+                line=dict(color="#ff5555", dash="dash", width=1),
+                showlegend=False, hoverinfo="skip",
+            ), row=1, col=2)
+        for start, end, _p in result.clusters:
+            fig.add_vrect(x0=start, x1=end, row=1, col=2, fillcolor="#ff5555", opacity=0.2, line_width=0)
+
+        verdict = "significant" if result.h0reject else "not significant"
+        self._apply_common_style(
+            fig,
+            default_title=f"SPM — {title} ({verdict}, alpha={result.alpha})",
+            xaxis_title=st["xlabel"] or "sample (normalized cycle)",
+            yaxis_title=st["ylabel"] or "Activation (a.u.)",
+            xaxis2_title="sample (normalized cycle)",
+            yaxis2_title="SPM{t}",
+        )
+        self._chart_view.show_figure(fig, filename_stem="spm")
 
     # ── export ───────────────────────────────────────────────────────────
 

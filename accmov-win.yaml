@@ -102,3 +102,5 @@ dependencies:
       - pyside6-essentials==6.5.3
       - shiboken6==6.5.3
       - pingouin==0.6.1
+      - spm1d==0.4.53
+      - pywavelets==1.9.0
