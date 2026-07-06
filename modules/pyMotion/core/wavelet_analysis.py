@@ -55,27 +55,20 @@ def prepare_wavelet_input(
     return BatchTrial(trial.name, out, trial.cycles, group=trial.group)
 
 
-def instantaneous_median_frequency(
-    data: np.ndarray,
-    fs: float,
-    freq_low: float = 20.0,
-    freq_high: float = 450.0,
-    n_freqs: int = 40,
-    wavelet: str = "cmor1.5-1.0",
+def _cwt_power_surface(
+    data: np.ndarray, fs: float, freq_low: float, freq_high: float, n_freqs: int, wavelet: str,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Time-resolved median frequency of a 1-D signal via CWT.
+    """Shared CWT core: log-spaced analysis frequencies from freq_low to
+    freq_high Hz (log spacing matches how EMG spectral content is usually
+    inspected, and keeps scale counts reasonable across a wide band),
+    wavelet power at each (frequency, time) point.
 
-    Log-spaced analysis frequencies from freq_low to freq_high Hz (log
-    spacing matches how EMG spectral content is usually inspected, and
-    keeps scale counts reasonable across a wide band). At each time sample,
-    the median frequency is the lowest analysis frequency whose cumulative
-    wavelet power (summed from freq_low upward) reaches half the total
-    power at that sample -- the direct per-sample analogue of
-    timeSeriesTable.medFreq's whole-segment "cumulative FFT power crosses
-    50%" rule.
-
-    Returns (freqs_hz, instantaneous_medfreq), both length n_freqs and
-    len(data) respectively.
+    Returns (freqs_hz, power) -- freqs_hz ascending, power shape
+    (n_freqs, len(data)). Both instantaneous_median_frequency() (the
+    per-cycle summary curve used for group comparison) and
+    wavelet_scalogram() (the full time x frequency view for visual
+    inspection) are built on this, so the CWT itself only runs once per
+    call site rather than being duplicated between the two.
     """
     import pywt  # deferred: only this analysis needs it
 
@@ -86,19 +79,93 @@ def instantaneous_median_frequency(
     coefs, actual_freqs = pywt.cwt(data, scales, wavelet, sampling_period=1.0 / fs)
     power = np.abs(coefs) ** 2  # (n_freqs, n_samples)
 
-    # Sort ascending by frequency so cumulative power is monotonic in
-    # frequency, matching medFreq's use of a frequency-ascending FFT output.
+    # Sort ascending by frequency so cumulative power (used by
+    # _medfreq_from_power) is monotonic in frequency, matching medFreq's
+    # use of a frequency-ascending FFT output.
     order = np.argsort(actual_freqs)
-    power = power[order]
-    actual_freqs = actual_freqs[order]
+    return actual_freqs[order], power[order]
 
+
+def _medfreq_from_power(freqs_hz: np.ndarray, power: np.ndarray) -> np.ndarray:
+    """Per-time-sample median frequency from a (freqs_hz-ascending) CWT
+    power surface: at each time sample, the median frequency is the lowest
+    analysis frequency whose cumulative power (summed from freq_low upward)
+    reaches half the total power at that sample -- the direct per-sample
+    analogue of timeSeriesTable.medFreq's whole-segment "cumulative FFT
+    power crosses 50%" rule."""
     cum = np.cumsum(power, axis=0)
     half = cum[-1] / 2.0
     # (cum <= half).sum(axis=0) reproduces np.searchsorted(col, half, side="right")
     # per column, vectorized across all time samples at once.
-    idx = np.clip((cum <= half[np.newaxis, :]).sum(axis=0), 0, len(actual_freqs) - 1)
-    inst_medfreq = actual_freqs[idx]
-    return actual_freqs, inst_medfreq
+    idx = np.clip((cum <= half[np.newaxis, :]).sum(axis=0), 0, len(freqs_hz) - 1)
+    return freqs_hz[idx]
+
+
+def instantaneous_median_frequency(
+    data: np.ndarray,
+    fs: float,
+    freq_low: float = 20.0,
+    freq_high: float = 450.0,
+    n_freqs: int = 40,
+    wavelet: str = "cmor1.5-1.0",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Time-resolved median frequency of a 1-D signal via CWT.
+
+    Returns (freqs_hz, instantaneous_medfreq), length n_freqs and
+    len(data) respectively.
+    """
+    freqs_hz, power = _cwt_power_surface(data, fs, freq_low, freq_high, n_freqs, wavelet)
+    return freqs_hz, _medfreq_from_power(freqs_hz, power)
+
+
+def wavelet_scalogram(
+    data: np.ndarray,
+    fs: float,
+    freq_low: float = 20.0,
+    freq_high: float = 450.0,
+    n_freqs: int = 40,
+    wavelet: str = "cmor1.5-1.0",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Full CWT power surface for one channel's whole (uncropped, real-time)
+    signal -- the time x frequency heatmap ("scalogram") view, for visually
+    inspecting one trial/channel's raw time-domain frequency content, as
+    opposed to instantaneous_median_frequency's cycle-averaged summary curve
+    used for group comparison.
+
+    Returns (time_s, freqs_hz, power, instantaneous_medfreq):
+      time_s: seconds, length len(data)
+      freqs_hz: ascending, length n_freqs
+      power: shape (n_freqs, len(data))
+      instantaneous_medfreq: same per-sample median-frequency ridge
+        instantaneous_median_frequency would return, computed from the same
+        power surface so the CWT isn't run twice.
+    """
+    freqs_hz, power = _cwt_power_surface(data, fs, freq_low, freq_high, n_freqs, wavelet)
+    inst_medfreq = _medfreq_from_power(freqs_hz, power)
+    time_s = np.arange(len(data)) / fs
+    return time_s, freqs_hz, power, inst_medfreq
+
+
+def cone_of_influence(time_s: np.ndarray, wavelet: str = "cmor1.5-1.0") -> np.ndarray:
+    """Cone-of-influence boundary, in Hz, at each point in time_s -- the
+    standard Torrence & Compo (1998) e-folding-time definition (usually
+    expressed in scale; converted here to frequency since that's this
+    module's unit throughout).
+
+    At distance d (seconds) from the nearer edge of the signal, wavelet
+    power at frequencies below sqrt(2) * center_freq / d doesn't have
+    enough signal on one side to be trustworthy -- that region is the
+    "cone" plotted as a shaded/dashed boundary on a scalogram (see
+    wavelet_scalogram). Returns +inf at d == 0 (the very edge sample,
+    where nothing is reliable).
+    """
+    import pywt
+
+    center_freq = pywt.central_frequency(wavelet)
+    span = time_s[-1] - time_s[0] if len(time_s) > 1 else 0.0
+    d = np.minimum(time_s - time_s[0], (time_s[0] + span) - time_s)
+    with np.errstate(divide="ignore"):
+        return np.where(d > 0, np.sqrt(2) * center_freq / d, np.inf)
 
 
 def wavelet_medfreq_curve(
