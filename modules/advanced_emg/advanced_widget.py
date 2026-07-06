@@ -1,15 +1,14 @@
 """
 modules/advanced_emg/advanced_widget.py — Advanced EMG Analysis page.
 
-First working draft: External-folder batch import (emg/ + cycles/, matching
-musclesynergies_py's convention) + Co-contraction Index + Muscle Synergy
-(NMF). Wavelet Analysis and SPM are listed as roadmap items but not
+External-folder batch import (emg/ + cycles/, matching musclesynergies_py's
+convention) + Current Workspace "Prep Data" (organizes each workspace
+participant's already-exported files -- <name>_emg_processed.csv,
+<name>_Events.csv's Cycles section -- into <workspace>/Data_Adv, then loads
+it via the same external-folder path; see
+core.batch_io.prep_data_adv_from_workspace) + Co-contraction Index + Muscle
+Synergy (NMF). Wavelet Analysis and SPM are listed as roadmap items but not
 implemented yet.
-
-Workspace-based batch import is not wired up yet either -- there is no
-established convention anywhere in the app for turning kinematics/user
-events into multiple discrete-rep cycle boundaries (see
-core.batch_io.from_workspace's docstring).
 """
 
 from PySide6.QtCore import Qt
@@ -18,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel, QComboBox,
     QPushButton, QSpinBox, QDoubleSpinBox, QStackedWidget, QFileDialog, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox, QApplication,
-    QLineEdit, QCheckBox, QColorDialog, QDialog, QListWidget, QTabWidget,
+    QLineEdit, QCheckBox, QColorDialog, QDialog, QListWidget, QListWidgetItem, QTabWidget,
 )
 
 import os
@@ -27,7 +26,9 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from modules.pyMotion.core.batch_io import load_external_folder, load_external_groups
+from modules.pyMotion.core.batch_io import (
+    load_external_folder, load_external_groups, prep_data_adv_from_workspace,
+)
 from modules.pyMotion.core.batch_dataset import BatchDataset, subset_cycles
 from modules.pyMotion.core.synergy import (
     prepare_synergy_input, extract_synergies, classify_kmeans, group_synergy_summary,
@@ -75,6 +76,9 @@ class AdvancedAnalysisWidget(QWidget):
         self._dataset: BatchDataset | None = None
         self._cycles_path: str | None = None
         self._emg_path: str | None = None
+        self._ws = None            # live workspace object, set via on_workspace_changed()
+        self._ws_path: str | None = None  # workspace folder path (Data_Adv is written under it)
+        self._ws_groups: dict[str, str] = {}  # participant name -> user-typed group name; absent = ungrouped
         self._prepared_cache = {}    # trial_name -> enveloped BatchTrial
         self._cci_results = {}       # trial_name -> (scalar, curve, signal_a, signal_b)
         self._cci_muscles = None     # (chan_a, chan_b) for the current _cci_results
@@ -188,7 +192,7 @@ class AdvancedAnalysisWidget(QWidget):
         self._source_combo = QComboBox()
         self._source_combo.addItems([
             "External Folder (emg/ + cycles/)",
-            "Current Workspace (coming soon)",
+            "Current Workspace",
         ])
         self._style_combo(self._source_combo)
         self._source_combo.currentIndexChanged.connect(self._on_source_changed)
@@ -585,17 +589,197 @@ class AdvancedAnalysisWidget(QWidget):
     def _build_workspace_source_page(self):
         page = QWidget()
         vl = QVBoxLayout(page)
+        vl.setContentsMargins(0, 6, 0, 6)
+        vl.setSpacing(6)
+
         note = self._lbl(
-            "Batch import from the current workspace isn't wired up yet -- "
-            "there's no established convention yet for turning kinematics/"
-            "user events into multiple discrete-rep cycle boundaries. Use "
-            "External Folder for now.",
+            "Organizes each participant's already-exported files into "
+            "<workspace>/Data_Adv, then loads it -- same emg/+cycles/ "
+            "convention as External Folder. Requires, per participant: a "
+            "saved report (Batch Process / Generate Report -> "
+            "<name>_emg_processed.csv) and, for multi-cycle trials, an "
+            "Export Events / Export All Events run in Kinematics Inspection "
+            "after detecting cycles (falls back to the whole processed "
+            "segment as one cycle otherwise).",
             size=11, color="#6272a4",
         )
         note.setWordWrap(True)
         vl.addWidget(note)
+
+        self._btn_prep_data = QPushButton("Prep Data for Advanced EMG Analysis")
+        self._style_button(self._btn_prep_data, accent=True)
+        self._btn_prep_data.clicked.connect(self._prep_data_from_workspace)
+        vl.addWidget(self._btn_prep_data)
+
+        self._workspace_status_label = self._lbl("No workspace loaded.", color="#6272a4", size=11)
+        self._workspace_status_label.setWordWrap(True)
+        vl.addWidget(self._workspace_status_label)
+
+        vl.addWidget(self._lbl("Groups (optional)", bold=True))
+        group_hint = self._lbl(
+            "Name a group, check which participants belong to it, then Add "
+            "Group -- repeat for as many groups as needed (e.g. Control, "
+            "LBP). Participants never added to a group are written "
+            "ungrouped -- if no group is defined at all, the output is flat "
+            "(Data_Adv/emg, Data_Adv/cycles); otherwise each group gets its "
+            "own Data_Adv/<group>/{emg,cycles} and ungrouped participants "
+            "are filed under \"Ungrouped\".",
+            size=10, color="#6272a4",
+        )
+        group_hint.setWordWrap(True)
+        vl.addWidget(group_hint)
+
+        self._ws_group_name_edit = QLineEdit()
+        self._ws_group_name_edit.setPlaceholderText("Group name, e.g. Control")
+        vl.addWidget(self._ws_group_name_edit)
+
+        vl.addWidget(self._lbl("Available participants", size=11, color="#6272a4"))
+        self._ws_participant_list = QListWidget()
+        self._ws_participant_list.setMaximumHeight(120)
+        self._ws_participant_list.setStyleSheet(
+            "QListWidget{background:#1e1f28;color:#f8f8f2;border:none;"
+            "border-radius:4px;font-size:11px;}"
+        )
+        vl.addWidget(self._ws_participant_list)
+
+        btn_add_ws_group = QPushButton("Add Group")
+        self._style_button(btn_add_ws_group, accent=True)
+        btn_add_ws_group.clicked.connect(self._add_ws_group)
+        vl.addWidget(btn_add_ws_group)
+
+        vl.addWidget(self._lbl("Defined groups", size=11, color="#6272a4"))
+        self._ws_groups_list = QListWidget()
+        self._ws_groups_list.setMaximumHeight(90)
+        self._ws_groups_list.setStyleSheet(
+            "QListWidget{background:#1e1f28;color:#f8f8f2;border:none;"
+            "border-radius:4px;font-size:11px;}"
+        )
+        vl.addWidget(self._ws_groups_list)
+
+        btn_clear_ws_groups = QPushButton("Clear All Groups")
+        self._style_button(btn_clear_ws_groups)
+        btn_clear_ws_groups.clicked.connect(self._clear_ws_groups)
+        vl.addWidget(btn_clear_ws_groups)
+
         vl.addStretch()
         return page
+
+    def _refresh_ws_participant_list(self):
+        """Rebuild the "Available participants" checklist from the current
+        workspace's participant list -- shows only participants not yet
+        assigned to a group (an assigned one drops out once Add Group is
+        clicked, so the next group's checklist doesn't re-offer it), and
+        drops assignments for participant names no longer in the workspace."""
+        self._ws_participant_list.clear()
+        names = [p.name for p in self._ws.participants] if self._ws else []
+        self._ws_groups = {n: g for n, g in self._ws_groups.items() if n in names}
+        for name in names:
+            if name in self._ws_groups:
+                continue
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self._ws_participant_list.addItem(item)
+
+    def _refresh_ws_groups_list(self):
+        self._ws_groups_list.clear()
+        counts = {}
+        for group in self._ws_groups.values():
+            counts[group] = counts.get(group, 0) + 1
+        for group, n in counts.items():
+            self._ws_groups_list.addItem(f"{group}  ({n} participant{'s' if n != 1 else ''})")
+
+    def _add_ws_group(self):
+        group_name = self._ws_group_name_edit.text().strip()
+        if not group_name:
+            QMessageBox.information(self, "Add Group", "Enter a group name first.")
+            return
+
+        checked = [
+            self._ws_participant_list.item(i).text()
+            for i in range(self._ws_participant_list.count())
+            if self._ws_participant_list.item(i).checkState() == Qt.Checked
+        ]
+        if not checked:
+            QMessageBox.information(self, "Add Group", "Check at least one participant.")
+            return
+
+        for name in checked:
+            self._ws_groups[name] = group_name
+        self._ws_group_name_edit.clear()
+        self._refresh_ws_participant_list()
+        self._refresh_ws_groups_list()
+
+    def _clear_ws_groups(self):
+        self._ws_groups.clear()
+        self._refresh_ws_participant_list()
+        self._refresh_ws_groups_list()
+
+    def on_workspace_changed(self, ws, path):
+        """Called from main.py when a workspace is created/loaded/cleared --
+        keeps a live reference so "Prep Data" always reflects the workspace's
+        current participants/cycles, not a snapshot from load time."""
+        self._ws = ws
+        self._ws_path = path
+        self._refresh_ws_participant_list()
+        self._refresh_ws_groups_list()
+        if ws is None or not getattr(ws, "participants", None):
+            self._workspace_status_label.setText("No workspace loaded.")
+        else:
+            self._workspace_status_label.setText(
+                f"Workspace: {len(ws.participants)} participant(s) loaded."
+            )
+
+    def _prep_data_from_workspace(self):
+        """Organize every workspace participant's already-exported files
+        (<name>_emg_processed.csv, <name>_Events.csv's Cycles section) into
+        <workspace>/Data_Adv/{emg,cycles} and load that folder into this
+        widget -- the "Prep Data" workflow described in the Advanced EMG
+        Data Source tab.
+
+        Reads from disk (see batch_io.prep_data_adv_from_workspace) rather
+        than the live workspace object -- extra_events in a live session can
+        be lost well before this runs (toggling Detect Cycles off, reloading
+        the workspace, ...), so the participant folders' own exported files
+        are the durable source of truth instead.
+        """
+        if self._ws is None or not self._ws_path:
+            QMessageBox.information(
+                self, "Prep Data", "Load a workspace first."
+            )
+            return
+
+        if not self._ws.participants:
+            QMessageBox.information(
+                self, "Prep Data", "The current workspace has no participants."
+            )
+            return
+
+        try:
+            dest_dir, warnings, grouped = prep_data_adv_from_workspace(
+                self._ws, self._ws_path, groups_by_name=(self._ws_groups or None),
+            )
+            if grouped:
+                loaded = load_external_groups(dest_dir, cycle_mode="discrete")
+            else:
+                loaded = load_external_folder(
+                    os.path.join(dest_dir, "cycles"), os.path.join(dest_dir, "emg"),
+                    cycle_mode="discrete",
+                )
+        except Exception as e:
+            QMessageBox.critical(self, "Prep Data Failed", str(e))
+            return
+
+        self._on_dataset_loaded(loaded)
+        self._workspace_status_label.setText(
+            f"Prepped {len(loaded)} participant(s) to:\n{dest_dir}"
+        )
+        summary = f"Prepared and loaded {len(loaded)} participant(s) from:\n{dest_dir}"
+        if warnings:
+            summary += "\n\nNotes:\n" + "\n".join(warnings)
+        (QMessageBox.warning if warnings else QMessageBox.information)(
+            self, "Prep Data", summary,
+        )
 
     def _build_cci_params_page(self):
         page = QWidget()

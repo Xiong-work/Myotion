@@ -90,6 +90,45 @@ def _cycles_from_events(events, task_type=None):
     return next(iter(result.values()), [])
 
 
+def resolve_participant_cycles(
+    profile, task_type=None, override=None, participant_name=None, trial_duration=None
+):
+    """Resolve one participant's (t_start, t_end) cycle boundaries.
+
+    Priority order: explicit override, then CycleStart_/CycleEnd_ events (see
+    _cycles_from_events), then profile.crop_interval as a single whole-trial
+    cycle, then -- if trial_duration is given -- the full (0, trial_duration)
+    recording as a last-resort single cycle. Shared by batch_io.from_workspace()
+    (in-memory BatchDataset) and the Advanced EMG "Prep Data" workspace export,
+    so both resolve a participant's cycles identically.
+
+    trial_duration: the participant's full recording length in seconds (e.g.
+    timeSeriesTable.time). Mirrors workspace.saveReport()'s own fallback --
+    a participant with no crop_interval gets seg_start/seg_end = 0.0/tst.time
+    there, i.e. "no crop set" already means "whole trial is the valid
+    segment" elsewhere in the app, so this fallback matches that rather than
+    demanding an explicit crop/cycle step before data can be prepped at all.
+    None (the default) keeps the old behavior of raising instead.
+
+    Raises ValueError if none of the above sources yield a boundary.
+    """
+    if override is not None:
+        return list(override)
+
+    cycles = _cycles_from_events(getattr(profile, "extra_events", []), task_type)
+    if not cycles and profile.crop_interval is not None:
+        cycles = [tuple(profile.crop_interval)]
+    if not cycles and trial_duration is not None:
+        cycles = [(0.0, float(trial_duration))]
+    if not cycles:
+        name = participant_name or "participant"
+        raise ValueError(
+            f"'{name}' has no crop_interval, no detected cycles, and no "
+            "explicit cycles provided -- cannot define a cycle boundary"
+        )
+    return cycles
+
+
 def _quietest_window_std(arr, win):
     """Std-dev of the flattest `win`-sample window in arr (baseline estimate)."""
     n = len(arr)
