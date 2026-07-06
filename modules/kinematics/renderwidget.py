@@ -1,6 +1,6 @@
 import os as _os
 
-from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QBoxLayout
+from PySide6.QtWidgets import QWidget, QLabel, QStackedLayout
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QPainter
 
@@ -50,23 +50,29 @@ class RenderWidget(QWidget):
         else:
             self.placeholder.setText("No model to render")
 
-        self.vblayout = QVBoxLayout()
-        self.vblayout.setContentsMargins(0, 0, 0, 0)
+        # Both widgets live in this stack from construction -- switching which
+        # one is visible via setCurrentWidget() avoids repeatedly reparenting
+        # bodyrender (a QOpenGLWidget) in and out of the layout on every
+        # setModel() call. Reparenting a native OpenGL surface into an
+        # already-shown top-level window is what caused the whole window to
+        # visibly flicker/redraw on the first file load (e.g. Gait Analysis,
+        # opened maximized before any model is set).
+        self.stack = QStackedLayout()
+        self.stack.setContentsMargins(0, 0, 0, 0)
         # No AlignCenter override here: let the label stretch to fill the
         # available area so its white background actually shows, instead of
         # sizing down to just the pixmap and exposing the dark parent frame
         # around it. The label's own setAlignment(AlignCenter) above still
         # keeps the logo centered within that filled area.
-        self.vblayout.addWidget(self.placeholder)
-        self.setLayout(self.vblayout)
+        self.stack.addWidget(self.placeholder)
+        self.stack.addWidget(self.bodyrender)
+        self.setLayout(self.stack)
 
     def update(self):
         if self.bodyrender.model:
-            self.vblayout.removeWidget(self.placeholder)
-            self.vblayout.addWidget(self.bodyrender)
+            self.stack.setCurrentWidget(self.bodyrender)
         else:
-            self.vblayout.removeWidget(self.bodyrender)
-            self.vblayout.addWidget(self.placeholder)
+            self.stack.setCurrentWidget(self.placeholder)
 
     def setModel(self, model):
         self.bodyrender.setModel(model)

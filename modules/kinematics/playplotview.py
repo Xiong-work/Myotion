@@ -18,6 +18,12 @@ _PLACEHOLDER_LOGO_OPACITY = 0.12
 _EVENT_PEN  = pg.mkPen(color="#ffa500", width=1.5)
 _CYCLE_START_PEN = pg.mkPen(color="#2ecc71", width=1.5)  # green — CycleStart_*
 _CYCLE_END_PEN   = pg.mkPen(color="#e74c3c", width=1.5)  # red   — CycleEnd_*
+# Gait Analysis events (IC_L/TO_L/IC_R/TO_R, see gait_analysis_dialog.py) --
+# one color per side so initial-contact and toe-off on the same foot are
+# visually grouped, and easy to tell apart from the opposite foot's. Chosen
+# to stay distinct from the playbar/trace colors and from each other.
+_GAIT_LEFT_PEN  = pg.mkPen(color="#2e7d32", width=1.5)  # green — IC_L / TO_L
+_GAIT_RIGHT_PEN = pg.mkPen(color="#000000", width=1.5)  # black — IC_R / TO_R
 _ONSET_PEN  = pg.mkPen(color="#55cc77", width=1.5, style=Qt.PenStyle.DashLine)
 _OFFSET_PEN = pg.mkPen(color="#cc77cc", width=1.5, style=Qt.PenStyle.DashLine)
 _CURSOR_PEN = pg.mkPen(color="#e63946", width=2)
@@ -256,6 +262,10 @@ class PlayPlotWidget(QWidget):
             return _CYCLE_START_PEN
         if label.startswith("CycleEnd_"):
             return _CYCLE_END_PEN
+        if label.startswith("IC_L") or label.startswith("TO_L"):
+            return _GAIT_LEFT_PEN
+        if label.startswith("IC_R") or label.startswith("TO_R"):
+            return _GAIT_RIGHT_PEN
         return _EVENT_PEN
 
     def set_cycle_markers_visible(self, visible):

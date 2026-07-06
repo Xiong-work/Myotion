@@ -25,6 +25,11 @@ _NON_EMG_PATTERNS = [
     # Exactly F or M + x/y/z + optional digits. Common muscle abbreviations are
     # safe: RF, FDL, MG, MF, BF all differ because their 2nd char is not x/y/z.
     re.compile(r"^[FM][xyz]\d*$", re.IGNORECASE),
+    # Same, but plate-number BEFORE the axis letter: "F1X", "F2Y", "M3Z", etc.
+    # -- a naming convention some force-plate systems use instead of "Fx1".
+    re.compile(r"^[FM]\d*[xyz]$", re.IGNORECASE),
+    # Pre-computed center-of-pressure channels: "COP1X", "COP2Y", "COPX", etc.
+    re.compile(r"^COP\d*[xyz]$", re.IGNORECASE),
     # IMU sensor channels: "Sensor 1.ACCX1", "Sensor 3.GYROZ3", "Sensor 2.MAGY2", etc.
     # Requires "Sensor N." prefix -- "Sensor N.EMG" and "Sensor_EMG1" are kept.
     re.compile(r"^Sensor\s*\d+\.(ACC|GYRO|MAG)[XYZ]\d*$", re.IGNORECASE),
