@@ -938,40 +938,75 @@ class emg:
             return arr
         return arr[i_start:i_end]
 
+    def getFreqSafeFilterStatus(self):
+        """Describe what getFreqSafeSegment will actually apply right now,
+        given this channel's process config -- the single source of truth
+        both getFreqSafeSegment and any UI warning (see main.py's Frequency
+        Analysis page) read from, so they can't drift out of sync.
+
+        Returns {"has_config": bool, "dc_offset": bool, "band_pass": bool,
+        "cutoff_l": float or None, "cutoff_h": float or None, "order": int
+        or None}. "has_config" False means processWithConfigure has never
+        been run for this participant at all (frequency analysis would run
+        on the fully raw signal); "band_pass" False with "has_config" True
+        means a band-pass step exists but is disabled or has invalid/unset
+        cutoffs (e.g. left at the default 0 Hz) -- still worth flagging
+        since it silently falls back to unfiltered data either way.
+        """
+        status = {
+            "has_config": self.processCFG is not None,
+            "dc_offset": False, "band_pass": False,
+            "cutoff_l": None, "cutoff_h": None, "order": None,
+        }
+        if self.processCFG is None or self.rawTST is None:
+            return status
+        fs = self.rawTST.fs
+        for step_idx in range(self.processCFG.size()):
+            stype, _ = self.processCFG.getTypeInfo(step_idx)
+            cfg = self.processCFG[step_idx]
+            if stype == emgConfigEnum.DC_OFFSET and cfg.enable:
+                status["dc_offset"] = True
+            elif stype == emgConfigEnum.FILTER and cfg.enable and cfg.type == emgFilterEnum.BAND_PASS:
+                status["cutoff_l"] = cfg.cutoff_l
+                status["cutoff_h"] = cfg.cutoff_h
+                status["order"] = cfg.order
+                status["band_pass"] = (
+                    0 < cfg.cutoff_l < fs / 2
+                    and 0 < cfg.cutoff_h < fs / 2
+                    and cfg.cutoff_l < cfg.cutoff_h
+                )
+        return status
+
     def getFreqSafeSegment(self, channel, crop_interval=None):
         """Return a cropped EMG segment valid for frequency analysis.
 
         Applies only DC removal and band-pass filtering from processCFG
-        (by step type, not by index), then crops to crop_interval.
-        Rectification, LP-envelope, normalization, and summary steps are
-        intentionally skipped — they corrupt spectral content.
+        (see getFreqSafeFilterStatus -- by step type, not by index), then
+        crops to crop_interval. Rectification, LP-envelope, normalization,
+        and summary steps are intentionally skipped — they corrupt spectral
+        content.
 
-        Falls back to raw cropped signal if processCFG is not yet set.
+        Falls back to raw cropped signal if processCFG is not yet set, or
+        if the band-pass step is disabled/has invalid cutoffs -- see
+        getFreqSafeFilterStatus for a way to detect and warn about that
+        before trusting the result.
+
         Returns a numpy ndarray.
         """
         if self.rawTST is None or channel not in self.rawTST.labels:
             return np.array([])
         fs = self.rawTST.fs
         arr = np.array(self.rawTST[channel], dtype=float)
-        if self.processCFG is not None:
-            for step_idx in range(self.processCFG.size()):
-                stype, _ = self.processCFG.getTypeInfo(step_idx)
-                cfg = self.processCFG[step_idx]
-                try:
-                    if stype == emgConfigEnum.DC_OFFSET and cfg.enable:
-                        arr = arr - arr.mean()
-                    elif (stype == emgConfigEnum.FILTER
-                          and cfg.enable
-                          and cfg.type == emgFilterEnum.BAND_PASS
-                          and 0 < cfg.cutoff_l < fs / 2
-                          and 0 < cfg.cutoff_h < fs / 2
-                          and cfg.cutoff_l < cfg.cutoff_h):
-                        sos = _sig.butter(cfg.order, [cfg.cutoff_l, cfg.cutoff_h],
-                                          btype='bp', fs=fs, output='sos')
-                        arr = _sig.sosfiltfilt(sos, arr)
-                    # FULL_W_RECT, LP filter, NORMALIZATION, SUMMARY → skipped
-                except Exception as e:
-                    logger.warning("getFreqSafeSegment step {}: {}".format(step_idx, e))
+        status = self.getFreqSafeFilterStatus()
+        try:
+            if status["dc_offset"]:
+                arr = arr - arr.mean()
+            if status["band_pass"]:
+                sos = _sig.butter(status["order"], [status["cutoff_l"], status["cutoff_h"]],
+                                  btype='bp', fs=fs, output='sos')
+                arr = _sig.sosfiltfilt(sos, arr)
+        except Exception as e:
+            logger.warning("getFreqSafeSegment for '{}': {}".format(channel, e))
         return self._crop_array(arr, fs, crop_interval)
 
     def getCroppedEnvelopeSegment(self, channel, crop_interval=None):

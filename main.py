@@ -73,6 +73,7 @@ from modules.pyMotion.core.batch_scan import (
     scan_batch_folder, channel_signature_groups, build_participant, reassign_mvc_file,
 )
 from modules.pyMotion.core.batch_stitch import find_stitch_pairs, stitch_all
+from modules.pyMotion.core.freq_batch import event_segments
 
 os.environ["QT_FONT_DPI"] = "96"  # FIX Problem for High DPI and Scale above 100%
 # SET AS GLOBAL WIDGETS
@@ -1433,7 +1434,20 @@ class MainWindow(QMainWindow):
         widgets.comboBox_19.currentIndexChanged.connect(self.FFTPlotPerPageSelected)
         widgets.comboBox_20.currentIndexChanged.connect(self.FFTPlotPageIndexSelected)
 
-        # Export button at the bottom of the participants panel
+        # Apply Events + Export buttons at the bottom of the participants panel.
+        # "Apply Events" batch-cuts every checked participant's trial (see
+        # self.selectedParticipants, the same checkbox set the EMG batch tool
+        # uses) at their Kinematics-Inspection/Gait-Analysis events instead
+        # of the manual Start/End Time fields above.
+        self._btn_apply_freq_events = QPushButton(self.tr("Apply Events"))
+        self._btn_apply_freq_events.setCursor(Qt.PointingHandCursor)
+        self._btn_apply_freq_events.setStyleSheet(
+            "color:#f4f4f4; background-color:#2e7d32;"
+            " border-radius:6px; padding:6px 10px; font-weight:bold; margin:4px;"
+        )
+        self._btn_apply_freq_events.clicked.connect(self.applyFreqAnalysisEvents)
+        widgets.verticalLayout_140.addWidget(self._btn_apply_freq_events)
+
         self._btn_export_freq = QPushButton(self.tr("Export Freq Results"))
         self._btn_export_freq.setCursor(Qt.PointingHandCursor)
         self._btn_export_freq.setStyleSheet(
@@ -1442,6 +1456,16 @@ class MainWindow(QMainWindow):
         )
         self._btn_export_freq.clicked.connect(self.exportFreqAnalysisCSV)
         widgets.verticalLayout_140.addWidget(self._btn_export_freq)
+
+        # Shows whether DC-offset/band-pass are actually active for whatever
+        # (participant, channel) is currently selected (see emg.
+        # getFreqSafeFilterStatus) -- frequency analysis silently runs on
+        # the raw/unfiltered signal otherwise, with no other indication.
+        self._freq_filter_status_label = QLabel("")
+        self._freq_filter_status_label.setWordWrap(True)
+        self._freq_filter_status_label.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._freq_filter_status_label.hide()
+        widgets.verticalLayout_85.addWidget(self._freq_filter_status_label)
 
         # start page
         # widgets.settingsTopBtn.hide()
@@ -4040,6 +4064,166 @@ class MainWindow(QMainWindow):
                 QMessageBox.Ok,
             )
 
+    def applyFreqAnalysisEvents(self):
+        """Batch-cut every checked participant's trial (self.
+        selectedParticipants -- the same checkbox set the EMG batch tool
+        uses) at their Kinematics-Inspection/Gait-Analysis events (see
+        freq_batch.event_segments: each pair of consecutive events becomes
+        one segment) instead of the manual Start/End Time fields above, run
+        the same MNF/MDF math exportFreqAnalysisCSV uses for every EMG
+        channel on every segment, and save one CSV per participant into
+        that participant's own folder (same convention as
+        exportFreqAnalysisCSV). Also refreshes the FFT scroll panel for
+        whichever (participant, channel) is currently open in the tree,
+        for immediate visual feedback."""
+        if self.workspace is None:
+            return
+        if len(self.selectedParticipants) == 0:
+            QMessageBox.warning(
+                self, self.tr("Apply Events"),
+                self.tr(
+                    "Check one or more participants first (the same checkboxes "
+                    "used for batch EMG processing)."
+                ),
+                QMessageBox.Ok,
+            )
+            return
+
+        per_participant = {}  # p.name -> (fs, [row, ...])
+        skipped = []
+        issue_by_name = {}  # p.name -> filter issue text, or None if all clear
+        for p_name in self.selectedParticipants:
+            p = self.workspace.findParticipant(p_name)
+            if p is None:
+                continue
+            profile = self.workspace[p]
+            segments = event_segments(profile.extra_events, profile.crop_interval)
+            if not segments:
+                skipped.append(p.name)
+                continue
+
+            issue_by_name[p.name] = self._freqFilterIssue(profile.emg.getFreqSafeFilterStatus())
+
+            fs = profile.emg.getfs()
+            seg_start = profile.crop_interval[0] if profile.crop_interval is not None else 0.0
+            rows = []
+            for chan in profile.emg.getChannels():
+                arr = profile.emg.getFreqSafeSegment(chan, profile.crop_interval)
+                if len(arr) == 0:
+                    continue
+                tst = timeSeriesTable(fs, [chan], [arr])
+                for seg in segments:
+                    t_rel_start = max(0.0, min(seg["t0"] - seg_start, tst.time))
+                    t_rel_end   = max(0.0, min(seg["t1"] - seg_start, tst.time))
+                    if t_rel_end <= t_rel_start:
+                        continue
+                    freq_lin, v_lin = tst.fft(chan, t_rel_start, t_rel_end)
+                    total = float(np.sum(v_lin))
+                    if total > 0:
+                        mnf = float(np.dot(freq_lin, v_lin) / total)
+                        cum = np.cumsum(v_lin)
+                        idx = min(len(freq_lin) - 1,
+                                  int(np.searchsorted(cum, cum[-1] / 2, side="right")))
+                        mdf = float(freq_lin[idx])
+                    else:
+                        mnf = mdf = 0.0
+                    rows.append({
+                        "Channel": chan,
+                        "Segment": seg["label"],
+                        "Start (s)": round(seg["t0"], 4),
+                        "End (s)": round(seg["t1"], 4),
+                        "MNF (Hz)": round(mnf, 4),
+                        "MDF (Hz)": round(mdf, 4),
+                    })
+
+            if rows:
+                per_participant[p.name] = (fs, rows)
+            else:
+                skipped.append(p.name)
+
+        if skipped:
+            QMessageBox.information(
+                self, self.tr("Apply Events"),
+                self.tr(
+                    "These participants had no usable event segments (fewer "
+                    "than 2 events, or no EMG data) and were skipped: {}"
+                ).format(", ".join(skipped)),
+                QMessageBox.Ok,
+            )
+
+        filter_notes = [
+            "{}: {}".format(name, issue_by_name[name])
+            for name in per_participant if issue_by_name.get(name)
+        ]
+        if filter_notes:
+            QMessageBox.warning(
+                self, self.tr("Apply Events -- Filter Warning"),
+                self.tr(
+                    "Results were still computed and saved for these participants, "
+                    "but their frequency-safe signal is not fully filtered (see "
+                    "emg.getFreqSafeFilterStatus):\n{}"
+                ).format("\n".join(filter_notes)),
+                QMessageBox.Ok,
+            )
+
+        if not per_participant:
+            return
+
+        self._saveFreqBatchEventsCSV(per_participant)
+
+        # Visual feedback for whichever (participant, channel) is currently
+        # open in the tree -- plot every one of ITS segments right away,
+        # additive like manual "Add FFT" already is (doesn't clear existing
+        # plots first).
+        p, chan = self.freqAnalysis
+        if p is not None and p.name in self.selectedParticipants:
+            profile = self.workspace[p]
+            segments = event_segments(profile.extra_events, profile.crop_interval)
+            seg_start = profile.crop_interval[0] if profile.crop_interval is not None else 0.0
+            for seg in segments:
+                title = "Frequency Analysis: {} ({:.3f} s to {:.3f} s)".format(
+                    seg["label"], seg["t0"], seg["t1"]
+                )
+                newPlot = self.FreqAnalysisCreateQPlotView(
+                    p, chan, seg["t0"] - seg_start, seg["t1"] - seg_start,
+                    title=title, seg_start=seg_start,
+                )
+                self.freqAnalysisPlots.append(newPlot)
+                widgets.scrollArea_3.append(newPlot)
+            self.updateFreqAnalysisFFTPanel()
+
+    def _saveFreqBatchEventsCSV(self, per_participant):
+        """One CSV per participant, in that participant's own workspace
+        folder (os.path.join(self.home, p.name) -- same convention as
+        exportFreqAnalysisCSV), not a single file in the workspace root."""
+        fieldnames = ["Channel", "Segment", "Start (s)", "End (s)", "MNF (Hz)", "MDF (Hz)"]
+        saved_paths = []
+
+        import csv as _csv
+        for p_name, (fs, rows) in per_participant.items():
+            participant_dir = os.path.join(self.home, p_name)
+            os.makedirs(participant_dir, exist_ok=True)
+            save_path = os.path.join(participant_dir, p_name + "_freq_analysis_events.csv")
+            header = (
+                "# Participant: {}\n"
+                "# Sample frequency: {} Hz\n"
+                "# Segments: consecutive Kinematics Inspection / Gait Analysis events\n"
+            ).format(p_name, fs)
+            with open(save_path, "w", encoding="utf-8", newline="") as f:
+                f.write(header)
+                writer = _csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            saved_paths.append(save_path)
+
+        QMessageBox.information(
+            self, self.tr("Saved"),
+            self.tr(
+                "Batch frequency analysis (event segments) saved for {} participant(s):\n{}"
+            ).format(len(saved_paths), "\n".join(saved_paths)),
+            QMessageBox.Ok,
+        )
+
     def exportFreqAnalysisCSV(self):
         p, _ = self.freqAnalysis
         if p is None:
@@ -4685,26 +4869,60 @@ class MainWindow(QMainWindow):
             treeItem = QTreeWidgetItem()
             treeItem.setText(0, p.name)
             widgets.frequency_participants.addTopLevelItem(treeItem)
-            emg = self.workspace[p].emg
-            for c in emg.getChannels():
-                treeItem2 = QTreeWidgetItem(treeItem)
-                treeItem2.setText(0, c)  # channel name
-                treeItem.addChild(treeItem2)
-        # connect slots
+
+            profile = self.workspace[p]
+            channels = profile.emg.getChannels()
+            emg_group = QTreeWidgetItem(treeItem)
+            emg_group.setText(0, "EMG ({})".format(len(channels)))
+            for c in channels:
+                leaf = QTreeWidgetItem(emg_group, [c])
+                leaf.setData(0, Qt.ItemDataRole.UserRole, "emg")
+
+            # Shared with Kinematics Inspection / Gait Analysis -- same
+            # profile.extra_events list (see modules/kinematics/model.py) --
+            # so events marked there show up here without any extra wiring.
+            events = sorted(profile.extra_events, key=lambda ev: ev.time_s)
+            events_group = QTreeWidgetItem(treeItem)
+            events_group.setText(0, "Events ({})".format(len(events)))
+            for ev in events:
+                leaf = QTreeWidgetItem(events_group, [
+                    "{} | {} | {:.3f}s".format(ev.label, ev.context, ev.time_s)
+                ])
+                leaf.setData(0, Qt.ItemDataRole.UserRole, "event")
+                leaf.setData(0, Qt.ItemDataRole.UserRole + 1, ev.time_s)
+
+        # This page's tree is rebuilt from scratch every time the user
+        # navigates here (see preloadFreqAnalysisPage) -- disconnect first so
+        # repeated visits don't stack up duplicate connections (each one
+        # would otherwise re-fire the double-click handler once per visit).
+        try:
+            widgets.frequency_participants.itemDoubleClicked.disconnect(
+                self.updateFreqAnalysisWaveformPanel
+            )
+        except (TypeError, RuntimeError):
+            pass
         widgets.frequency_participants.itemDoubleClicked.connect(
             self.updateFreqAnalysisWaveformPanel
         )
         widgets.frequency_participants.setHeaderItem(QTreeWidgetItem(["Participant(s)"]))
-        widgets.frequency_participants.addTopLevelItem(treeItem)
 
     def updateFreqAnalysisWaveformPanel(self, item, column):
-        # if item is top level, return
-        if item.parent() is None:
+        parent = item.parent()
+        # Top-level participant row, or the "EMG (n)"/"Events (n)" group
+        # header itself (a direct child of the participant row) -- neither
+        # is a leaf to act on.
+        if parent is None or parent.parent() is None:
             return
 
-        p_name = item.parent().text(column)
-        channel = item.text(column)
+        p_name = parent.parent().text(0)
         p = self.workspace.findParticipant(p_name)
+        kind = item.data(0, Qt.ItemDataRole.UserRole)
+
+        if kind == "event":
+            self._onFreqEventDoubleClicked(p, item)
+            return
+
+        channel = item.text(column)
 
         # set state machine
         logger.info(
@@ -4731,7 +4949,97 @@ class MainWindow(QMainWindow):
         widgets.lineEdit_5.setText("{:.4f}".format(seg_start))
         widgets.lineEdit_4.setText("{:.4f}".format(seg_end))
 
+        self._updateFreqFilterStatusLabel(p)
         self.updateFreqAnalysisFFTPanel()
+
+    @staticmethod
+    def _freqFilterIssue(status):
+        """None if DC-offset + band-pass are both active; otherwise a short,
+        one-line description of what's missing (see emg.
+        getFreqSafeFilterStatus) -- same priority order (no config > no
+        band-pass > no DC-offset) as _updateFreqFilterStatusLabel's fuller
+        per-channel message, used here for the terser Apply Events batch
+        warning where one line per participant is all there's room for."""
+        if not status["has_config"]:
+            return "no EMG signal processing configured (raw signal)"
+        if not status["band_pass"]:
+            return "band-pass disabled or invalid cutoffs"
+        if not status["dc_offset"]:
+            return "DC-offset removal disabled"
+        return None
+
+    def _updateFreqFilterStatusLabel(self, p):
+        """Warn when getFreqSafeSegment (the signal every FFT in this page
+        is computed from) is about to run on unfiltered or partially-
+        filtered data -- otherwise this is silent (see emg.
+        getFreqSafeFilterStatus). Pass None to hide the label."""
+        if p is None:
+            self._freq_filter_status_label.hide()
+            return
+
+        status = self.workspace[p].emg.getFreqSafeFilterStatus()
+        if not status["has_config"]:
+            text = self.tr(
+                "⚠ No EMG signal processing has been configured for '{}' -- "
+                "Frequency Analysis is running on the RAW, unfiltered signal. "
+                "Configure it on the EMG Signal Processing page first."
+            ).format(p.name)
+            color = "#e74c3c"
+        elif not status["band_pass"]:
+            text = self.tr(
+                "⚠ Band-pass filtering is disabled or has invalid cutoffs for '{}' -- "
+                "Frequency Analysis is running without a band-pass filter."
+            ).format(p.name)
+            color = "#e0a800"
+        elif not status["dc_offset"]:
+            text = self.tr(
+                "⚠ DC-offset removal is disabled for '{}' -- band-pass "
+                "{:.0f}-{:.0f} Hz (order {}) is still applied."
+            ).format(p.name, status["cutoff_l"], status["cutoff_h"], status["order"])
+            color = "#e0a800"
+        else:
+            text = self.tr(
+                "✓ Filters active for '{}': DC-offset removed, band-pass "
+                "{:.0f}-{:.0f} Hz (order {})."
+            ).format(p.name, status["cutoff_l"], status["cutoff_h"], status["order"])
+            color = "#2e7d32"
+
+        self._freq_filter_status_label.setText(text)
+        self._freq_filter_status_label.setStyleSheet(
+            "font-size: 11px; padding: 2px 6px; font-weight: bold; color: {};".format(color)
+        )
+        self._freq_filter_status_label.show()
+
+    def _onFreqEventDoubleClicked(self, p, item):
+        """Populate Start/End Time from this event and the next one after it
+        (or the end of the currently-selected channel's segment, if this is
+        the last event) -- the same consecutive-event window an "Apply
+        Events" batch run uses for this pair (see freq_batch.event_segments),
+        so double-clicking one event previews exactly one segment of it."""
+        if self.freqAnalysis[0] is not p:
+            QMessageBox.information(
+                self, self.tr("Frequency Analysis"),
+                self.tr(
+                    "Double-click an EMG channel for '{}' first, then an event "
+                    "to set the time window from it."
+                ).format(p.name),
+                QMessageBox.Ok,
+            )
+            return
+
+        t0 = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        events = sorted(self.workspace[p].extra_events, key=lambda ev: ev.time_s)
+        later = [ev.time_s for ev in events if ev.time_s > t0]
+        if later:
+            t1 = later[0]
+        else:
+            crop = self.workspace[p].crop_interval
+            seg_start = crop[0] if crop is not None else 0.0
+            tst = self._get_freq_safe_tst(p, self.freqAnalysis[1])
+            t1 = seg_start + tst.time
+
+        widgets.lineEdit_5.setText("{:.4f}".format(t0))
+        widgets.lineEdit_4.setText("{:.4f}".format(t1))
 
     def updateFreqAnalysisFFTPanel(self):
         # update control ui
@@ -4769,6 +5077,7 @@ class MainWindow(QMainWindow):
         self.freqAnalysis = (None, None)
         self.filesystemTree = QFileSystemModel()
         self.selectedParticipants.clear()
+        self._updateFreqFilterStatusLabel(None)
         self._crop_group.setEnabled(False)
         self._crop_start_spin.setValue(0.0)
         self._crop_end_spin.setValue(0.0)
@@ -5433,6 +5742,7 @@ class MainWindow(QMainWindow):
             widgets.frequency_participants.clear()
             self.freqAnalysisPlots.clear()
             widgets.scrollArea_3.deleteAllPages()
+            self._updateFreqFilterStatusLabel(None)
             return -1
         self.updateFreqAnalysisParticipantTree(self.workspace.getParticipants())
         self.freqAnalysisPlots.clear()
