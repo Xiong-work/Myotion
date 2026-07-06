@@ -22,3 +22,4 @@ from .exit_confirm_dialog import ExitConfirmDialog
 from .splash_screen import MyotionSplashScreen
 from .about_dialog import AboutDialog
 from .playground_dialog import PlaygroundDialog
+from .gait_analysis_dialog import GaitAnalysisDialog

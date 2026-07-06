@@ -32,7 +32,7 @@ class ForcePlateGroup:
     against it without importing from the kinematics module.
     """
 
-    __slots__ = ("plate_id", "fs", "Fx", "Fy", "Fz", "Mx", "My", "Mz", "corners")
+    __slots__ = ("plate_id", "fs", "Fx", "Fy", "Fz", "Mx", "My", "Mz", "corners", "Cx", "Cy")
 
     def __init__(
         self,
@@ -45,6 +45,8 @@ class ForcePlateGroup:
         My: np.ndarray,
         Mz: np.ndarray,
         corners=None,
+        Cx=None,
+        Cy=None,
     ):
         self.plate_id = plate_id
         self.fs = fs
@@ -56,6 +58,13 @@ class ForcePlateGroup:
         self.Mz = Mz
         # ndarray shape [4, 3] — 4 corner positions in C3D lab frame (mm), or None
         self.corners = corners
+        # Some systems (e.g. AMTI/Bertec-style "COP1X"/"COP1Y" analog channels)
+        # export the center of pressure already computed, in lab-frame mm --
+        # more accurate than deriving it from Mx/My since it accounts for the
+        # plate's true origin offset. None when the C3D only has raw
+        # force/moment channels (COP must then be derived, see gait_events.py).
+        self.Cx = Cx
+        self.Cy = Cy
 
     def __repr__(self):
         has_geo = self.corners is not None

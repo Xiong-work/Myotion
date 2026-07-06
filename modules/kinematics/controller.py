@@ -90,6 +90,29 @@ class Controller:
         self.playbar.cycleMarkersVisibilityToggled.connect(self.top.set_cycle_markers_visible)
         self.playbar.clearPlotRequested.connect(self._onClearPlotRequested)
 
+        # Filter parameters used by tree_item_select's "Filter" toggle --
+        # exposed as instance attributes (rather than hardcoded) so a
+        # specialized host (e.g. GaitAnalysisDialog) can override them via its
+        # own settings dialog. Defaults match this module's previous hardcoded
+        # values, so this is purely additive: Kinematics Inspection's default
+        # behavior (no override) is unchanged.
+        self.marker_filter_cutoff = 6.0
+        self.marker_filter_order = 2
+        self.fp_filter_cutoff = 10.0
+        self.fp_filter_order = 4
+        self.emg_filter_cutoff_l = 50.0
+        self.emg_filter_cutoff_h = 450.0
+        self.emg_filter_order = 2
+        # Linear-envelope low-pass stage, applied after full-wave
+        # rectification -- see _apply_emg_pipeline. Defaults match the app's
+        # existing envelope step (emgConfigure's LOW_PASS step).
+        self.emg_envelope_cutoff = 6.0
+        self.emg_envelope_order = 2
+        # Off by default -- EMG display isn't filtered in Kinematics Inspection
+        # unless a host explicitly opts in (see GaitAnalysisDialog's Filter
+        # Settings dialog).
+        self.emg_filter_enabled = False
+
         # Cache the last-selected EMG channel so the onset button can act without re-click
         self._current_emg_channel = None
         self._current_emg_arr = None
@@ -259,9 +282,9 @@ class Controller:
                 zs.append(p.xyz[1])
             fs = self.model.kinematic.point_fs
             if do_filter:
-                xs = self._apply_filter(xs, fs, cutoff_hz=6.0, order=2)
-                ys = self._apply_filter(ys, fs, cutoff_hz=6.0, order=2)
-                zs = self._apply_filter(zs, fs, cutoff_hz=6.0, order=2)
+                xs = self._apply_filter(xs, fs, cutoff_hz=self.marker_filter_cutoff, order=self.marker_filter_order)
+                ys = self._apply_filter(ys, fs, cutoff_hz=self.marker_filter_cutoff, order=self.marker_filter_order)
+                zs = self._apply_filter(zs, fs, cutoff_hz=self.marker_filter_cutoff, order=self.marker_filter_order)
             # x-axis here is frame index, not seconds -- leave rate at its
             # default (1: the playback cursor's update() does frame / rate,
             # and a frame-index axis needs frame / 1 = frame). Event/pick
@@ -287,6 +310,12 @@ class Controller:
             # full raw signal — no crop, no normalization — matching Time Domain analysis.
             y_arr = self.model.emg.get_kinematics_display(name)
             fs_emg = self.model.emg.getfs()
+            if do_filter and self.emg_filter_enabled:
+                y_arr = self._apply_emg_pipeline(
+                    y_arr, fs_emg,
+                    self.emg_filter_cutoff_l, self.emg_filter_cutoff_h, self.emg_filter_order,
+                    self.emg_envelope_cutoff, self.emg_envelope_order,
+                )
             x = list(np.arange(len(y_arr)) / fs_emg)
             rate = self.model.kinematic_frame_rate()
             created = self.top.add_line(x, list(y_arr), name, 'channel', rate, overlay=overlay, kind="emg")
@@ -306,7 +335,7 @@ class Controller:
             fp, attr = self._force_channels[name]
             data = np.asarray(getattr(fp, attr), dtype=float)
             if do_filter:
-                data = self._apply_filter(data, fp.fs, cutoff_hz=10.0, order=4)
+                data = self._apply_filter(data, fp.fs, cutoff_hz=self.fp_filter_cutoff, order=self.fp_filter_order)
             x_time = list(np.arange(len(data)) / fp.fs)
             point_fs = self.model.kinematic_frame_rate()
             created = self.top.add_line(
@@ -373,6 +402,39 @@ class Controller:
             return _sig.filtfilt(b, a, arr)
         except Exception:
             return arr
+
+    @staticmethod
+    def _apply_bandpass(data, fs, low_hz, high_hz, order):
+        """Zero-phase Butterworth band-pass filter, mirroring _apply_filter's
+        safety checks. Returns data unchanged if too short, fs is unknown, or
+        the band isn't valid for the Nyquist frequency."""
+        arr = np.asarray(data, dtype=float)
+        if fs <= 0 or len(arr) < 3 * (order + 1):
+            return arr
+        nyq = fs / 2.0
+        if not (0 < low_hz < high_hz < nyq):
+            return arr
+        try:
+            b, a = _sig.butter(order, [low_hz / nyq, high_hz / nyq], btype='band')
+            return _sig.filtfilt(b, a, arr)
+        except Exception:
+            return arr
+
+    @classmethod
+    def _apply_emg_pipeline(cls, data, fs, band_l, band_h, band_order, envelope_cutoff, envelope_order):
+        """DC removal -> band-pass -> full-wave rectification -> low-pass
+        envelope -- the standard EMG conditioning chain (mirrors
+        emgConfigure's default stepConfig), applied on the fly for display
+        when a profile has no processCFG configured (e.g. a standalone trial
+        with no participant-level EMG setup)."""
+        arr = np.asarray(data, dtype=float)
+        if len(arr) == 0:
+            return arr
+        arr = arr - arr.mean()  # DC removal
+        arr = cls._apply_bandpass(arr, fs, band_l, band_h, band_order)
+        arr = np.abs(arr)  # full-wave rectification
+        arr = cls._apply_filter(arr, fs, cutoff_hz=envelope_cutoff, order=envelope_order)  # linear envelope
+        return arr
 
     # ------------------------------------------------------------------
     # Event creation / deletion

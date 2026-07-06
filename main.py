@@ -1374,7 +1374,7 @@ class MainWindow(QMainWindow):
         widgets.btn_print.clicked.connect(self.underDevelopmentClick)
 
         # Quick Start buttons on the start page.
-        widgets.pushButton_2.clicked.connect(self.underDevelopmentClick)
+        widgets.pushButton_2.clicked.connect(self.openGaitAnalysisDialog)
         widgets.pushButton_3.clicked.connect(self.openPlaygroundDialog)
         widgets.pushButton_4.clicked.connect(self.underDevelopmentClick)
 
@@ -2234,6 +2234,9 @@ class MainWindow(QMainWindow):
 
     def openPlaygroundDialog(self):
         PlaygroundDialog(self).exec()
+
+    def openGaitAnalysisDialog(self):
+        GaitAnalysisDialog(self).exec()
 
     def applyTheme(self, mode: str):
         """Load the QSS theme file then re-apply modern widget palette for contrast."""

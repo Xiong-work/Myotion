@@ -262,6 +262,10 @@ class PlayBarWidget(QWidget):
         hbox = QHBoxLayout(ctrl)
         hbox.setContentsMargins(0, 0, 0, 0)
         hbox.setSpacing(6)
+        # Exposed so a specialized host (e.g. GaitAnalysisDialog) can insert
+        # its own buttons into this row at a specific position instead of
+        # only ever appending after the last button below.
+        self.toolbar_layout = hbox
 
         _transport_ss = (
             buttonStyle

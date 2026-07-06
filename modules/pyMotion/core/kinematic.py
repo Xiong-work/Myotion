@@ -14,6 +14,15 @@ _FP_CHANNEL_RE = re.compile(
     r"^(?:(?:Force|Torque|Moment)\.)?([FM][xyz])(\d*)$",
     re.IGNORECASE,
 )
+# Same, but plate-number BEFORE the axis letter -- a naming convention some
+# force-plate systems use instead of the above: "F1X", "F2Y", "M3Z", etc.
+# No "Force."/"Moment."-prefixed variant of this order has been seen, so it
+# isn't offered here.
+_FP_CHANNEL_RE_ALT = re.compile(r"^([FM])(\d*)([xyz])$", re.IGNORECASE)
+
+# Pre-computed center-of-pressure channels some systems export directly
+# instead of (or alongside) raw Mx/My: "COP1X", "COP2Y", "COPX", etc.
+_COP_CHANNEL_RE = re.compile(r"^COP(\d*)([xy])$", re.IGNORECASE)
 
 # Vicon Plug-in-Gait (and similar) model outputs -- joint angles, forces,
 # moments, powers -- are stored in the same POINT block as real 3D markers;
@@ -154,10 +163,11 @@ class kinematic:
     def _load_force_plates(self, c3d_obj):
         """Group force plate analog channels into ForcePlateGroup objects.
 
-        Handles labeled channels (Fx1/Fy1/…), prefixed (Force.Fx1/…), and
-        duplicate-name channels without a plate number (Force.Fx appearing twice).
-        Attaches corner geometry from FORCE_PLATFORM:CORNERS when available.
-        Returns [] silently on any error.
+        Handles labeled channels (Fx1/Fy1/…), prefixed (Force.Fx1/…),
+        number-before-axis channels (F1X/M2Z/…), pre-computed COP channels
+        (COP1X/COP1Y/…), and duplicate-name channels without a plate number
+        (Force.Fx appearing twice). Attaches corner geometry from
+        FORCE_PLATFORM:CORNERS when available. Returns [] silently on any error.
         """
         try:
             analog = c3d_obj.analog
@@ -165,12 +175,7 @@ class kinematic:
             plates = {}    # plate_id (int) → {comp: ndarray}
             seq_ctr = {}   # component name → next plate_id for numberless channels
 
-            for label in analog.labels:
-                m = _FP_CHANNEL_RE.match(label)
-                if m is None:
-                    continue
-                comp = m.group(1).lower()  # fx / fy / fz / mx / my / mz
-                num = m.group(2)
+            def _assign(comp, num, label):
                 if num:
                     plate_id = int(num)
                 else:
@@ -178,11 +183,23 @@ class kinematic:
                         seq_ctr[comp] = 1
                     plate_id = seq_ctr[comp]
                     seq_ctr[comp] += 1
-
                 if plate_id not in plates:
                     plates[plate_id] = {}
                 if comp not in plates[plate_id]:  # first occurrence wins
                     plates[plate_id][comp] = np.array(analog[label], dtype=np.float32)
+
+            for label in analog.labels:
+                m = _FP_CHANNEL_RE.match(label)
+                if m is not None:
+                    _assign(m.group(1).lower(), m.group(2), label)  # fx / fy / fz / mx / my / mz
+                    continue
+                m = _FP_CHANNEL_RE_ALT.match(label)
+                if m is not None:
+                    _assign((m.group(1) + m.group(3)).lower(), m.group(2), label)
+                    continue
+                m = _COP_CHANNEL_RE.match(label)
+                if m is not None:
+                    _assign("cop" + m.group(2).lower(), m.group(1), label)
 
             zeros = np.zeros(1, dtype=np.float32)
             result = []
@@ -202,6 +219,8 @@ class kinematic:
                     My=d.get("my", zeros),
                     Mz=d.get("mz", zeros),
                     corners=corners,
+                    Cx=d.get("copx"),
+                    Cy=d.get("copy"),
                 ))
             if result:
                 logger.info("C3D force plates loaded: {}".format(result))
