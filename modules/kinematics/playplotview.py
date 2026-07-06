@@ -1,7 +1,7 @@
 import os as _os
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QScrollArea, QSizePolicy, QLabel, QGraphicsOpacityEffect,
@@ -72,11 +72,20 @@ def _make_plot(name: str, x_label: str) -> pg.PlotWidget:
     return plt
 
 
+_CROP_REGION_BRUSH = pg.mkBrush(255, 165, 0, 60)   # translucent orange fill
+_CROP_REGION_PEN   = pg.mkPen(color="#e07b39", width=1.5)
+
+
 class PlayPlotWidget(QWidget):
     """
     pyqtgraph-based signal viewer for the kinematics inspection panel.
     Renders instantly with a frame-accurate playback cursor.
     """
+
+    # Emitted (start_s, end_s) whenever the crop region is dragged on any
+    # subplot -- see set_crop_mode(). Not emitted for set_crop_range_s()'s
+    # own programmatic updates.
+    cropRangeChanged = Signal(float, float)
 
     def __init__(self):
         super().__init__()
@@ -148,6 +157,22 @@ class PlayPlotWidget(QWidget):
         # "channel" plots). See _event_x() for why this can't just reuse the
         # per-subplot "rate" stored in playline/_plot_refs.
         self._kinematic_fps = 1.0
+
+        # Crop mode: a draggable pg.LinearRegionItem mirrored onto every
+        # visible subplot (each converted to that subplot's own x units --
+        # frame index for markers, seconds for channels -- via
+        # _region_x_from_seconds/_region_seconds_from_x), kept in sync so
+        # dragging any one of them moves them all. See set_crop_mode().
+        self._crop_mode = False
+        self._crop_regions = []       # [{"widget":, "region":, "rate":}, ...]
+        self._crop_range_s = None     # (t0, t1) -- current crop bounds while active
+        self._syncing_crop = False    # reentrancy guard for the sync loop below
+        # Event-marker crop filter: (t0, t1) to hide markers outside that
+        # window, or None to show all -- independent of _crop_mode/
+        # _crop_range_s above (that's the draggable region shown only while
+        # actively cropping; this stays in effect for as long as a crop is
+        # applied, or previewed while dragging). See set_crop_event_filter().
+        self._crop_event_filter = None
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -222,10 +247,13 @@ class PlayPlotWidget(QWidget):
         self.playline.append({"line": cursor, "rate": float(rate)})
         self._plot_refs.append({"widget": plt, "rate": float(rate)})
 
+        if self._crop_mode and self._crop_range_s is not None:
+            self._add_crop_region_to(plt, float(rate), *self._crop_range_s)
+
         # Draw events that were already registered before this subplot was added
         for em in self._event_markers:
             line = plt.addLine(x=self._event_x(em["event"].time_s, rate), pen=self._pen_for_event(em["event"]))
-            if self._is_cycle_event(em["event"]) and not self._cycle_markers_visible:
+            if not self._marker_visible(em["event"]):
                 line.setVisible(False)
             em["items"].append((plt, line))
 
@@ -268,14 +296,40 @@ class PlayPlotWidget(QWidget):
             return _GAIT_RIGHT_PEN
         return _EVENT_PEN
 
+    def _marker_visible(self, event):
+        """Whether *event*'s marker line should currently be shown --
+        combines the cycle-markers toggle (set_cycle_markers_visible) and
+        the crop event filter (set_crop_event_filter); either one can hide
+        it, neither deletes it."""
+        if self._is_cycle_event(event) and not self._cycle_markers_visible:
+            return False
+        if self._crop_event_filter is not None:
+            t0, t1 = self._crop_event_filter
+            if not (t0 <= event.time_s <= t1):
+                return False
+        return True
+
+    def _refresh_all_marker_visibility(self):
+        for em in self._event_markers:
+            visible = self._marker_visible(em["event"])
+            for _, line in em["items"]:
+                line.setVisible(visible)
+
     def set_cycle_markers_visible(self, visible):
         """Show/hide CycleStart_/CycleEnd_ markers without deleting them --
         wired to the playbar's "Show Cycles" toggle."""
         self._cycle_markers_visible = visible
-        for em in self._event_markers:
-            if self._is_cycle_event(em["event"]):
-                for _, line in em["items"]:
-                    line.setVisible(visible)
+        self._refresh_all_marker_visibility()
+
+    def set_crop_event_filter(self, range_s):
+        """Show/hide every event marker based on whether its time falls
+        inside range_s = (t0, t1), or show all when range_s is None --
+        keeps the plot's event lines in sync with an active or in-progress-
+        drag crop range (see GaitAnalysisDialog's crop feature) without
+        touching the events themselves. Cheap enough to call on every drag
+        signal, unlike a full metrics recompute."""
+        self._crop_event_filter = tuple(range_s) if range_s is not None else None
+        self._refresh_all_marker_visibility()
 
     def update(self, frame: int):
         """Move all playback cursors to the given kinematic frame."""
@@ -284,7 +338,7 @@ class PlayPlotWidget(QWidget):
 
     def add_event(self, event):
         pen = self._pen_for_event(event)
-        hide = self._is_cycle_event(event) and not self._cycle_markers_visible
+        hide = not self._marker_visible(event)
         items = []
         for pr in self._plot_refs:
             line = pr["widget"].addLine(x=self._event_x(event.time_s, pr["rate"]), pen=pen)
@@ -451,5 +505,94 @@ class PlayPlotWidget(QWidget):
         self._overlay_kind = None
         self._overlay_color_idx = 0
         self._overlay_items = {}
+        # The region items themselves are children of the subplot widgets
+        # just deleteLater()'d above -- just drop our own references.
+        self._crop_mode = False
+        self._crop_regions = []
+        self._crop_range_s = None
+        self._crop_event_filter = None
         self.lo.addWidget(self.placeholder)
         self.placeholder.show()
+
+    # ── Crop region (mouse-drag) ─────────────────────────────────────────────
+
+    def _region_x_from_seconds(self, t, rate):
+        return t * self._kinematic_fps / (rate or 1.0)
+
+    def _region_seconds_from_x(self, x, rate):
+        return x * (rate or 1.0) / self._kinematic_fps
+
+    def _add_crop_region_to(self, widget, rate, t0, t1):
+        region = pg.LinearRegionItem(
+            values=[self._region_x_from_seconds(t0, rate), self._region_x_from_seconds(t1, rate)],
+            brush=_CROP_REGION_BRUSH, pen=_CROP_REGION_PEN,
+        )
+        region.setZValue(100)
+        widget.addItem(region)
+        entry = {"widget": widget, "region": region, "rate": rate}
+        self._crop_regions.append(entry)
+        region.sigRegionChanged.connect(lambda: self._on_crop_region_changed(entry))
+
+    def _on_crop_region_changed(self, changed_entry):
+        if self._syncing_crop:
+            return
+        self._syncing_crop = True
+        try:
+            x0, x1 = changed_entry["region"].getRegion()
+            t0 = self._region_seconds_from_x(x0, changed_entry["rate"])
+            t1 = self._region_seconds_from_x(x1, changed_entry["rate"])
+            if t1 < t0:
+                t0, t1 = t1, t0
+            self._crop_range_s = (t0, t1)
+            for entry in self._crop_regions:
+                if entry is changed_entry:
+                    continue
+                entry["region"].setRegion([
+                    self._region_x_from_seconds(t0, entry["rate"]),
+                    self._region_x_from_seconds(t1, entry["rate"]),
+                ])
+            self.cropRangeChanged.emit(t0, t1)
+        finally:
+            self._syncing_crop = False
+
+    def set_crop_mode(self, enabled, initial_range_s=None):
+        """Show/hide the draggable crop region on every currently visible
+        subplot (and any added afterward while still enabled -- see
+        add_line()). initial_range_s: (t0, t1) in seconds, required when
+        enabling."""
+        if enabled == self._crop_mode and enabled:
+            return
+        if not enabled:
+            for entry in self._crop_regions:
+                try:
+                    entry["widget"].removeItem(entry["region"])
+                except Exception:
+                    pass
+            self._crop_regions = []
+            self._crop_mode = False
+            return
+        self._crop_mode = True
+        self._crop_range_s = tuple(initial_range_s) if initial_range_s else (0.0, 1.0)
+        for entry in self._plot_refs:
+            self._add_crop_region_to(entry["widget"], entry["rate"], *self._crop_range_s)
+
+    def get_crop_range_s(self):
+        """Current crop bounds in seconds, or None if crop mode is off or
+        there's no subplot to read a region from."""
+        if not self._crop_mode or not self._crop_regions:
+            return None
+        return self._crop_range_s
+
+    def set_crop_range_s(self, t0, t1):
+        """Programmatically move the crop region (e.g. loading a previously
+        saved profile.crop_interval) without emitting cropRangeChanged."""
+        self._crop_range_s = (t0, t1)
+        self._syncing_crop = True
+        try:
+            for entry in self._crop_regions:
+                entry["region"].setRegion([
+                    self._region_x_from_seconds(t0, entry["rate"]),
+                    self._region_x_from_seconds(t1, entry["rate"]),
+                ])
+        finally:
+            self._syncing_crop = False

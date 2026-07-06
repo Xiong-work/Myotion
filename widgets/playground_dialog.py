@@ -52,6 +52,8 @@ class PlaygroundDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(self.tr("Playground"))
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinimizeButtonHint
+                             | Qt.WindowType.WindowMaximizeButtonHint)
         self.setMinimumSize(480, 360)
 
         layout = QVBoxLayout(self)

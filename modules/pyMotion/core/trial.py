@@ -2,18 +2,25 @@ import numpy as np
 
 
 class TrialEvent:
-    """A single labeled event on a trial timeline (e.g. heel strike, toe off)."""
+    """A single labeled event on a trial timeline (e.g. heel strike, toe off).
 
-    __slots__ = ("time_s", "label", "context")
+    source: optional free-form provenance tag (e.g. "plate"/"marker" for a
+    Gait Analysis event -- see gait_analysis_dialog.py's _apply_gait_events).
+    Not part of equality/identity -- two events at the same time/label/
+    context are still "the same event" regardless of how they were tagged.
+    """
 
-    def __init__(self, time_s: float, label: str = "", context: str = ""):
+    __slots__ = ("time_s", "label", "context", "source")
+
+    def __init__(self, time_s: float, label: str = "", context: str = "", source: str = ""):
         self.time_s = float(time_s)
         self.label = label.strip()
         self.context = context.strip()
+        self.source = source.strip()
 
     def __repr__(self):
-        return "TrialEvent({:.3f}s, {!r}, {!r})".format(
-            self.time_s, self.label, self.context
+        return "TrialEvent({:.3f}s, {!r}, {!r}, source={!r})".format(
+            self.time_s, self.label, self.context, self.source
         )
 
     def __eq__(self, other):

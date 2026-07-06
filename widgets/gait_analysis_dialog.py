@@ -15,13 +15,14 @@ import os
 
 import numpy as np
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
     QMessageBox, QSplitter, QTreeWidget, QTreeWidgetItem,
     QAbstractItemView, QPlainTextEdit, QComboBox, QFormLayout, QDialogButtonBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QMenu, QInputDialog,
-    QGroupBox, QDoubleSpinBox, QSpinBox, QCheckBox,
+    QGroupBox, QDoubleSpinBox, QSpinBox, QCheckBox, QLineEdit,
 )
 
 from modules.pyMotion.core.c3d import c3dFile, c3d_probe
@@ -36,7 +37,10 @@ from modules.kinematics.controller import Controller
 from modules.kinematics.renderwidget import RenderWidget
 from modules.kinematics.playbarwidget import PlayBarWidget, buttonStyle
 from modules.kinematics.playplotview import PlayPlotWidget
-from widgets.gait_report_dialog import _GaitReportDialog
+from widgets.gait_report_dialog import (
+    _GaitReportDialog, _CCI_METHODS, _CCI_METHOD_LABELS,
+    _CCI_NORMALIZE_OPTIONS, _CCI_NORMALIZE_LABELS,
+)
 
 
 def _populate_label_tree(tree: QTreeWidget, profile) -> None:
@@ -44,7 +48,18 @@ def _populate_label_tree(tree: QTreeWidget, profile) -> None:
     groups for *profile* (a workspace.profile). Mirrors main.py's
     populateKinematicTree() but for a single standalone profile with no
     Workspace/participant wrapper node.
+
+    Preserves each top-level group's expand/collapse state across the
+    rebuild (matched by its label, e.g. "EMG (19)", which a rename doesn't
+    change) -- without this, every call (e.g. after renaming an EMG
+    channel, see _on_tree_context_menu) collapsed everything back, forcing
+    the user to re-expand "EMG" before renaming the next channel.
     """
+    expanded_labels = {
+        tree.topLevelItem(i).text(0)
+        for i in range(tree.topLevelItemCount())
+        if tree.topLevelItem(i).isExpanded()
+    }
     tree.clear()
     tree.setColumnCount(1)
     k = profile.kinematic
@@ -55,7 +70,7 @@ def _populate_label_tree(tree: QTreeWidget, profile) -> None:
         marker_group.setText(0, "Markers ({})".format(len(k.reallabels)))
         for point in k.reallabels:
             QTreeWidgetItem(marker_group, [point])
-        marker_group.setExpanded(False)
+        marker_group.setExpanded(marker_group.text(0) in expanded_labels)
 
         if k.anglelabels:
             angle_group = QTreeWidgetItem(tree)
@@ -64,7 +79,7 @@ def _populate_label_tree(tree: QTreeWidget, profile) -> None:
             angles_node.setText(0, "Angles ({})".format(len(k.anglelabels)))
             for label in k.anglelabels:
                 QTreeWidgetItem(angles_node, [label])
-            angle_group.setExpanded(False)
+            angle_group.setExpanded(angle_group.text(0) in expanded_labels)
             angles_node.setExpanded(False)
 
     # Raw Channels, not getChannels() -- this standalone dialog has no
@@ -76,7 +91,7 @@ def _populate_label_tree(tree: QTreeWidget, profile) -> None:
         emg_group.setText(0, "EMG ({})".format(len(emg_channels)))
         for c in emg_channels:
             QTreeWidgetItem(emg_group, [c])
-        emg_group.setExpanded(False)
+        emg_group.setExpanded(emg_group.text(0) in expanded_labels)
 
     if k.force_plates:
         fp_group = QTreeWidgetItem(tree)
@@ -86,7 +101,7 @@ def _populate_label_tree(tree: QTreeWidget, profile) -> None:
             plate_node.setText(0, "Plate {}".format(fp.plate_id))
             for comp in ("Fx", "Fy", "Fz"):
                 QTreeWidgetItem(plate_node, ["Plate{} {}".format(fp.plate_id, comp)])
-        fp_group.setExpanded(False)
+        fp_group.setExpanded(fp_group.text(0) in expanded_labels)
 
     all_events = sorted(list(k.events) + list(profile.extra_events), key=lambda ev: ev.time_s)
     if all_events:
@@ -94,12 +109,37 @@ def _populate_label_tree(tree: QTreeWidget, profile) -> None:
         ev_group.setText(0, "Events ({})".format(len(all_events)))
         for ev in all_events:
             source = "" if ev in profile.extra_events else " [C3D]"
-            QTreeWidgetItem(ev_group, [
+            item = QTreeWidgetItem(ev_group, [
                 "{} | {} | {:.3f}s{}".format(ev.label, ev.context, ev.time_s, source)
             ])
-        ev_group.setExpanded(False)
+            # Read back by _apply_crop_dim_to_event_tree to grey out rows
+            # outside the current crop window without needing to re-parse
+            # the display text.
+            item.setData(0, Qt.ItemDataRole.UserRole, ev.time_s)
+        ev_group.setExpanded(ev_group.text(0) in expanded_labels)
 
     tree.setHeaderItem(QTreeWidgetItem(["Trial"]))
+
+
+def _apply_crop_dim_to_event_tree(tree: QTreeWidget, crop_range) -> None:
+    """Grey out (never remove) Events-group rows whose time falls outside
+    crop_range = (t0, t1), or restore normal color when crop_range is None
+    -- keeps the full event list visible (crop stays non-destructive) while
+    showing which ones the current crop window actually includes. Cheap
+    enough to call on every crop-drag signal (see GaitAnalysisDialog.
+    _sync_crop_visuals) since it only restyles existing items."""
+    for i in range(tree.topLevelItemCount()):
+        top = tree.topLevelItem(i)
+        if not top.text(0).startswith("Events"):
+            continue
+        for j in range(top.childCount()):
+            child = top.child(j)
+            t = child.data(0, Qt.ItemDataRole.UserRole)
+            if t is None:
+                continue
+            in_range = crop_range is None or (crop_range[0] <= t <= crop_range[1])
+            child.setForeground(0, QColor("#000000" if in_range else "#aaaaaa"))
+        break
 
 
 _NO_MARKER = "(none)"
@@ -276,7 +316,9 @@ class _ManualGaitEventsDialog(QDialog):
         layout = QVBoxLayout(self)
         hint = QLabel(self.tr(
             "Add, edit, or remove initial-contact (IC) / toe-off (TO) events "
-            "per side. Trial length: {:.3f} s."
+            "per side. Trial length: {:.3f} s. Rows shaded green were "
+            "detected from a force plate (more reliable than the marker-only "
+            "heuristic); saving here still produces plain manual events."
         ).format(total_time))
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -306,14 +348,14 @@ class _ManualGaitEventsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-        for event_type, t in existing_rows:
-            self._add_row(event_type, t)
+        for event_type, t, source in existing_rows:
+            self._add_row(event_type, t, source)
         if not existing_rows:
             self._add_row(_GAIT_EVENT_TYPES[0], None)
 
         self.resize(380, 320)
 
-    def _add_row(self, event_type=None, time_s=None):
+    def _add_row(self, event_type=None, time_s=None, source=""):
         row = self.table.rowCount()
         self.table.insertRow(row)
         combo = QComboBox()
@@ -322,7 +364,17 @@ class _ManualGaitEventsDialog(QDialog):
         combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.table.setCellWidget(row, 0, combo)
         time_txt = "{:.3f}".format(time_s) if time_s is not None else ""
-        self.table.setItem(row, 1, QTableWidgetItem(time_txt))
+        time_item = QTableWidgetItem(time_txt)
+        self.table.setItem(row, 1, time_item)
+        # Informational only, snapshotted when the dialog opened -- a
+        # force-plate-detected contact (see gait_events._merge_side_events)
+        # is more trustworthy than a marker-height guess, so it's worth
+        # flagging before the user decides what to edit. Saving from this
+        # dialog always produces fresh manual events with no source tag
+        # (see _apply_gait_events), regardless of what's shown here.
+        if source == "plate":
+            combo.setStyleSheet("background-color: #dff0d8;")
+            time_item.setBackground(QColor("#dff0d8"))
 
     def _remove_selected_rows(self):
         rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
@@ -359,14 +411,253 @@ class _ManualGaitEventsDialog(QDialog):
         return result, errors
 
 
+_EMG_SIDE_OPTIONS = ["Unspecified", "Right", "Left"]
+
+
+class _EMGReportChannelsDialog(QDialog):
+    """One-off channel picker + display-name + side step shown right before
+    building a report's EMG Activity section -- not remembered and not
+    shared with the Co-contraction pair picker (see _CCIPairsDialog, which
+    has its own Side column). Lets the user drop channels that aren't
+    actually muscles (footswitches, sync bits, ...) but still passed the
+    C3D EMG-channel filter, label the rest with a clinically readable name
+    for this report only (use the tree's "Rename Channel..." for a
+    permanent rename instead), and say which leg each sensor was actually
+    on -- a channel's envelope only means something for gait cycles on the
+    side it was recorded on; a single-leg EMG setup showing a "Left" bar
+    computed from a Right-leg sensor would be meaningless."""
+
+    def __init__(self, channels, parent=None, existing_sides=None):
+        super().__init__(parent)
+        self.setWindowTitle(self.tr("EMG Channels for Report"))
+        self._channels = list(channels)
+        existing_sides = existing_sides or {}
+
+        layout = QVBoxLayout(self)
+        hint = QLabel(self.tr(
+            "Choose which EMG channels to include in this report's EMG Activity "
+            "section, optionally rename them for display (e.g. \"EMG1.v\" -> "
+            "\"Tibialis Anterior\"), and say which leg each sensor was on -- "
+            "\"Unspecified\" shows both Right and Left bars for that channel."
+        ))
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.table = QTableWidget(len(self._channels), 3, self)
+        self.table.setHorizontalHeaderLabels(
+            [self.tr("Include"), self.tr("Side"), self.tr("Display Name")]
+        )
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setToolTip(self.tr("Double-click \"Include\" to select/deselect all"))
+        self.table.horizontalHeader().sectionDoubleClicked.connect(self._on_header_double_clicked)
+        self._checks = []
+        self._side_combos = []
+        self._name_edits = []
+        for row, chan in enumerate(self._channels):
+            check = QCheckBox(chan)
+            check.setChecked(True)
+            self.table.setCellWidget(row, 0, check)
+
+            side_combo = QComboBox()
+            side_combo.addItems(_EMG_SIDE_OPTIONS)
+            side_combo.setCurrentText(existing_sides.get(chan, "Unspecified"))
+            self.table.setCellWidget(row, 1, side_combo)
+
+            name_edit = QLineEdit(chan)
+            self.table.setCellWidget(row, 2, name_edit)
+
+            self._checks.append(check)
+            self._side_combos.append(side_combo)
+            self._name_edits.append(name_edit)
+        layout.addWidget(self.table)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.resize(480, 360)
+
+    def selection(self):
+        """Returns [(original_name, display_name, side), ...] for checked
+        rows only, in the original channel order. side is "Right"/"Left"/
+        "Unspecified"."""
+        result = []
+        for chan, check, side_combo, name_edit in zip(
+            self._channels, self._checks, self._side_combos, self._name_edits
+        ):
+            if check.isChecked():
+                display = name_edit.text().strip() or chan
+                result.append((chan, display, side_combo.currentText()))
+        return result
+
+    def sides(self):
+        """{channel: side} for every row, checked or not -- used to persist
+        the assignment across dialog reopens (see GaitAnalysisDialog.
+        _emg_channel_side)."""
+        return {chan: combo.currentText() for chan, combo in zip(self._channels, self._side_combos)}
+
+    def _on_header_double_clicked(self, section):
+        """Double-clicking the "Include" header toggles all rows at once --
+        all checked -> uncheck all, otherwise -> check all (mirrors a
+        standard header-checkbox pattern without adding a real one)."""
+        if section != 0 or not self._checks:
+            return
+        all_checked = all(c.isChecked() for c in self._checks)
+        for c in self._checks:
+            c.setChecked(not all_checked)
+
+
+class _CCIPairsDialog(QDialog):
+    """Define one or more muscle pairs (+ side + method + normalization) to
+    compute Co-contraction Index for in the report -- a separate, reusable
+    step rather than a one-shot picker buried inside the report dialog,
+    since a trial can have more than one antagonist pair worth checking
+    (e.g. ankle and knee).
+
+    CCI is single-sided: it's only computed for the leg the pair is marked
+    as being on, using that leg's own gait cycles -- comparing a Right-leg
+    sensor's envelope against a Left-leg sensor's during "Right" cycles (or
+    vice versa) isn't a meaningful co-contraction index, so there's no
+    Right+Left pair of numbers here like the other report sections."""
+
+    def __init__(self, channels, existing_pairs, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(self.tr("Co-contraction Index Pairs"))
+        self._channels = list(channels)
+
+        layout = QVBoxLayout(self)
+        hint = QLabel(self.tr(
+            "Pick one or more same-side muscle pairs to compute Co-contraction "
+            "Index for in the report. Always computed from the enveloped EMG "
+            "within that side's own detected gait cycles, never the whole trial. "
+            "Defaults to Trial Max normalization -- Rudolph's index scales with "
+            "the signals' raw amplitude, so left at \"None\" it reads as ~0 for "
+            "typical raw-EMG-scale envelopes."
+        ))
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.table = QTableWidget(0, 5, self)
+        self.table.setHorizontalHeaderLabels([
+            self.tr("Muscle A"), self.tr("Muscle B"), self.tr("Side"),
+            self.tr("Method"), self.tr("Normalize"),
+        ])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.table)
+
+        row_btns = QHBoxLayout()
+        add_btn = QPushButton(self.tr("+ Row"))
+        add_btn.clicked.connect(lambda: self._add_row())
+        remove_btn = QPushButton(self.tr("− Row"))
+        remove_btn.clicked.connect(self._remove_selected_rows)
+        row_btns.addWidget(add_btn)
+        row_btns.addWidget(remove_btn)
+        row_btns.addStretch()
+        layout.addLayout(row_btns)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        for a, b, side, method_key, norm_key in existing_pairs:
+            self._add_row(a, b, side, method_key, norm_key)
+        if not existing_pairs:
+            self._add_row()
+
+        self.resize(640, 320)
+
+    def _add_row(self, a=None, b=None, side=None, method_key=None, norm_key=None):
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        combo_a = QComboBox()
+        combo_a.addItems(self._channels)
+        combo_b = QComboBox()
+        combo_b.addItems(self._channels)
+        if a and a in self._channels:
+            combo_a.setCurrentText(a)
+        if b and b in self._channels:
+            combo_b.setCurrentText(b)
+        elif len(self._channels) > 1:
+            combo_b.setCurrentIndex(1)
+        self.table.setCellWidget(row, 0, combo_a)
+        self.table.setCellWidget(row, 1, combo_b)
+
+        combo_side = QComboBox()
+        combo_side.addItems(["Right", "Left"])
+        if side in ("Right", "Left"):
+            combo_side.setCurrentText(side)
+        self.table.setCellWidget(row, 2, combo_side)
+
+        combo_method = QComboBox()
+        for label, _key in _CCI_METHODS:
+            combo_method.addItem(label)
+        if method_key:
+            for i, (_label, key) in enumerate(_CCI_METHODS):
+                if key == method_key:
+                    combo_method.setCurrentIndex(i)
+                    break
+        self.table.setCellWidget(row, 3, combo_method)
+
+        combo_norm = QComboBox()
+        for label, _key in _CCI_NORMALIZE_OPTIONS:
+            combo_norm.addItem(label)
+        if norm_key:
+            for i, (_label, key) in enumerate(_CCI_NORMALIZE_OPTIONS):
+                if key == norm_key:
+                    combo_norm.setCurrentIndex(i)
+                    break
+        self.table.setCellWidget(row, 4, combo_norm)
+
+    def _remove_selected_rows(self):
+        rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.table.removeRow(r)
+
+    def pairs(self):
+        """Returns [(muscle_a, muscle_b, side, method_key, normalize_key), ...],
+        skipping rows where A and B are the same channel."""
+        result = []
+        for row in range(self.table.rowCount()):
+            combo_a = self.table.cellWidget(row, 0)
+            combo_b = self.table.cellWidget(row, 1)
+            combo_side = self.table.cellWidget(row, 2)
+            combo_method = self.table.cellWidget(row, 3)
+            combo_norm = self.table.cellWidget(row, 4)
+            a, b = combo_a.currentText(), combo_b.currentText()
+            if not a or not b or a == b:
+                continue
+            side = combo_side.currentText()
+            method_key = _CCI_METHODS[combo_method.currentIndex()][1]
+            norm_key = _CCI_NORMALIZE_OPTIONS[combo_norm.currentIndex()][1]
+            result.append((a, b, side, method_key, norm_key))
+        return result
+
+
 class GaitAnalysisDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(self.tr("Gait Analysis"))
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinimizeButtonHint
+                             | Qt.WindowType.WindowMaximizeButtonHint)
 
         self._profile = None
         self._model = None
         self._controller = None
+        # Non-modal Manual Gait Events dialog currently open, or None (see
+        # _on_manual_gait_events) -- tracked so a second click raises the
+        # existing one instead of opening a duplicate, and so a fresh trial
+        # load can close it out.
+        self._manual_events_dlg = None
+        # Header info from the last "Detect Gait Events" run (source/forward
+        # axis/warnings/markers used) -- None until a detection has run;
+        # _build_results_text needs this to render anything (see _load).
+        self._last_detect_meta = None
 
         layout = QVBoxLayout(self)
 
@@ -401,11 +692,26 @@ class GaitAnalysisDialog(QDialog):
         _filter_idx = self._playbar.toolbar_layout.indexOf(self._playbar.filterCheck)
         self._playbar.toolbar_layout.insertWidget(_filter_idx, self._detect_btn)
         self._playbar.toolbar_layout.insertWidget(_filter_idx + 1, self._playbar.manualCyclesButton)
+
+        # Crop -- left of "Detect Gait Events". Non-destructive: drags a
+        # shaded region on whatever's plotted below (see PlayPlotWidget.
+        # set_crop_mode), Apply just stores (t0, t1) on the shared
+        # profile.crop_interval the app already uses elsewhere (see
+        # workspace.profile); nothing is deleted or resampled. Downstream
+        # calculations (_compute_gait_metrics) filter to this window when set.
+        self._crop_btn = QPushButton(self.tr("Crop"))
+        self._crop_btn.setStyleSheet(buttonStyle)
+        self._crop_btn.setCheckable(True)
+        self._crop_btn.setEnabled(False)
+        self._crop_btn.toggled.connect(self._on_crop_toggled)
+        _detect_idx = self._playbar.toolbar_layout.indexOf(self._detect_btn)
+        self._playbar.toolbar_layout.insertWidget(_detect_idx, self._crop_btn)
         # Connected once, directly to the button, rather than via the shared
         # manualCyclesRequested signal Controller listens on -- _load()
         # disconnects each fresh Controller's own listener so only this
         # module's manual gait-event editor opens, not the generic one.
         self._playbar.manualCyclesButton.clicked.connect(self._on_manual_gait_events)
+        self._playbar.manualCyclesButton.setEnabled(False)
 
         # Filter Settings replaces "Filter" on the toolbar -- opens a popup
         # with the on/off toggle plus the cutoff/order used for Markers/Force
@@ -421,9 +727,27 @@ class GaitAnalysisDialog(QDialog):
         )
         self._filter_settings_btn = QPushButton(self.tr("Filter Settings..."))
         self._filter_settings_btn.setStyleSheet(buttonStyle)
+        self._filter_settings_btn.setEnabled(False)
         self._filter_settings_btn.clicked.connect(self._on_filter_settings)
         _filter_check_idx = self._playbar.toolbar_layout.indexOf(self._playbar.filterCheck)
         self._playbar.toolbar_layout.insertWidget(_filter_check_idx + 1, self._filter_settings_btn)
+
+        # Co-contraction Index pairs -- defined here (left of Filter Settings)
+        # rather than inside the report itself, since more than one pair can
+        # be worth checking (e.g. ankle and knee antagonists) and picking
+        # them ahead of time keeps the report a pure "review what I set up"
+        # step. Reset on every new load (see _load).
+        self._cci_pairs = []
+        # {channel: "Right"/"Left"/"Unspecified"} -- persisted across
+        # _EMGReportChannelsDialog reopens within one load so a single-leg
+        # EMG setup only needs to be described once. Reset on every new load.
+        self._emg_channel_side = {}
+        self._cci_btn = QPushButton(self.tr("Co-contraction..."))
+        self._cci_btn.setStyleSheet(buttonStyle)
+        self._cci_btn.setEnabled(False)
+        self._cci_btn.clicked.connect(self._on_cci_pairs)
+        _filter_settings_idx = self._playbar.toolbar_layout.indexOf(self._filter_settings_btn)
+        self._playbar.toolbar_layout.insertWidget(_filter_settings_idx, self._cci_btn)
 
 
         top_row = QHBoxLayout()
@@ -434,6 +758,15 @@ class GaitAnalysisDialog(QDialog):
         # Stretch=1 on the file label pushes everything after it (Save /
         # Create Report) to the far right of the row.
         top_row.addWidget(self._file_label, 1)
+        # Off by default -- Save/Create Report average over every detected
+        # cycle unless this is checked, in which case only cycles whose
+        # initial contact came from a force plate (more accurate than the
+        # marker height-threshold heuristic, see gait_events._merge_side_
+        # events) are used; a side with none ends up with real NaN/empty
+        # results rather than a fabricated number.
+        self._verified_only_check = QCheckBox(self.tr("Force-plate-verified cycles only"))
+        self._verified_only_check.stateChanged.connect(self._show_cci_results)
+        top_row.addWidget(self._verified_only_check)
         self._save_btn = QPushButton(self.tr("Save..."))
         self._save_btn.setStyleSheet(buttonStyle)
         self._save_btn.setEnabled(False)
@@ -445,6 +778,28 @@ class GaitAnalysisDialog(QDialog):
         self._report_btn.clicked.connect(self._on_create_report)
         top_row.addWidget(self._report_btn)
         layout.addLayout(top_row)
+
+        # Shown/hidden by _on_crop_toggled while the Crop button is active;
+        # Clear Crop stays visible whenever profile.crop_interval is set so
+        # a crop from a previous session (or Apply) can be removed without
+        # re-entering crop mode.
+        crop_row = QHBoxLayout()
+        self._crop_status_label = QLabel(self.tr("Crop: none"))
+        crop_row.addWidget(self._crop_status_label)
+        self._crop_apply_btn = QPushButton(self.tr("Apply Crop"))
+        self._crop_apply_btn.clicked.connect(self._on_crop_apply)
+        self._crop_apply_btn.setVisible(False)
+        crop_row.addWidget(self._crop_apply_btn)
+        self._crop_cancel_btn = QPushButton(self.tr("Cancel"))
+        self._crop_cancel_btn.clicked.connect(self._on_crop_cancel)
+        self._crop_cancel_btn.setVisible(False)
+        crop_row.addWidget(self._crop_cancel_btn)
+        self._crop_clear_btn = QPushButton(self.tr("Clear Crop"))
+        self._crop_clear_btn.clicked.connect(self._on_crop_clear)
+        self._crop_clear_btn.setVisible(False)
+        crop_row.addWidget(self._crop_clear_btn)
+        crop_row.addStretch(1)
+        layout.addLayout(crop_row)
 
         # Cached from the last "Detect Gait Events" run -- reused by manual
         # edits (to keep step/stride length recomputed after a manual edit,
@@ -460,6 +815,16 @@ class GaitAnalysisDialog(QDialog):
         left_splitter = QSplitter(Qt.Orientation.Vertical)
         self._render = RenderWidget()
         self._plot = PlayPlotWidget()
+        # Live-preview the results panel while the crop region is dragged --
+        # connected once here since self._plot is reused across loads (see
+        # _load), rather than reconnected per trial.
+        self._plot.cropRangeChanged.connect(self._on_crop_range_dragged)
+        # Debounces the (heavy) results recompute triggered by dragging the
+        # crop region -- see _on_crop_range_dragged.
+        self._pending_crop_preview = None
+        self._crop_preview_timer = QTimer(self)
+        self._crop_preview_timer.setSingleShot(True)
+        self._crop_preview_timer.timeout.connect(self._apply_pending_crop_preview)
         left_splitter.addWidget(self._render)
         left_splitter.addWidget(self._plot)
         left_splitter.setStretchFactor(0, 3)
@@ -494,7 +859,13 @@ class GaitAnalysisDialog(QDialog):
 
         layout.addWidget(self._playbar)
 
-        self.showMaximized()
+        # Set the maximized state without showing yet -- main.py's caller
+        # shows this dialog via exec(), which makes it application-modal;
+        # calling showMaximized() here would show it non-modal first and
+        # force Qt to redo the native window (hide/re-show) to switch it to
+        # modal once exec() runs, which is what caused a brief small-window
+        # flicker on open.
+        self.setWindowState(Qt.WindowState.WindowMaximized)
 
     def closeEvent(self, event):
         reply = QMessageBox.question(
@@ -578,6 +949,9 @@ class GaitAnalysisDialog(QDialog):
 
         if self._controller is not None:
             self._controller.stop()
+        if self._manual_events_dlg is not None:
+            self._manual_events_dlg.close()
+            self._manual_events_dlg = None
 
         self._profile = workspace.profile(emg_obj, kin_obj)
         self._model = Model(self._profile)
@@ -598,8 +972,18 @@ class GaitAnalysisDialog(QDialog):
         self._detect_btn.setEnabled(True)
         self._save_btn.setEnabled(True)
         self._report_btn.setEnabled(True)
+        self._filter_settings_btn.setEnabled(True)
+        self._playbar.manualCyclesButton.setEnabled(True)
+        self._crop_btn.setEnabled(True)
+        self._cci_btn.setEnabled(bool(emg_obj.Channels))
+        self._cci_pairs = []
+        self._emg_channel_side = {}
         self._last_marker_xyz_by_label = {}
         self._last_heel_toe_labels = {}
+        self._last_detect_meta = None
+        self._crop_btn.setChecked(False)
+        self._update_crop_status_label()
+        self._sync_crop_visuals()
         self._results.clear()
 
     # ── Gait event detection ─────────────────────────────────────────────────
@@ -649,44 +1033,60 @@ class GaitAnalysisDialog(QDialog):
             right_toe=right_toe or "RTOE", left_toe=left_toe or "LTOE",
         )
 
-        self._apply_gait_events(result["HS"], result["TO"])
+        self._apply_gait_events(result["HS"], result["TO"], result.get("event_sources"))
 
-        self._results.setPlainText(
-            self._format_results(
-                result,
-                right_heel or _NO_MARKER, left_heel or _NO_MARKER,
-                right_toe or _NO_MARKER, left_toe or _NO_MARKER,
-            )
+        # Header info for the results panel that only a fresh detection run
+        # produces (source/forward axis/warnings/markers used) -- cached so
+        # _build_results_text can keep rebuilding the rest of the panel
+        # (crop/verified-only/CCI-aware) without re-running detection.
+        self._last_detect_meta = dict(
+            source=result["source"], forward_axis=result["forward_axis"],
+            warnings=result.get("warnings", []),
+            right_heel=right_heel or _NO_MARKER, left_heel=left_heel or _NO_MARKER,
+            right_toe=right_toe or _NO_MARKER, left_toe=left_toe or _NO_MARKER,
         )
+        self._refresh_results()
 
-    def _apply_gait_events(self, hs_by_side, to_by_side):
+    def _apply_gait_events(self, hs_by_side, to_by_side, event_sources=None):
         """Replace this trial's Gait-context events with a newly detected or
         manually-edited set, and refresh the timeline/tree to match. Shared
         by _on_detect_gait_events and _on_manual_gait_events so both go
         through one code path.
 
         hs_by_side / to_by_side: {"Right": [t, ...], "Left": [t, ...]}.
-        """
+        event_sources: gait_events.detect_gait_events()'s "event_sources"
+        ({side: {"HS": {t: "plate"/"marker"}, "TO": {...}}}), or None for a
+        manual edit (no detector produced these -- TrialEvent.source stays
+        "" rather than guessing)."""
         for ev in [e for e in self._model.extra_events if e.context == "Gait"]:
             self._model.extra_events.remove(ev)
             if ev in self._model.events:
                 self._model.events.remove(ev)
             self._controller.top.remove_event(ev)
 
+        event_sources = event_sources or {}
         side_abbr = {"Right": "R", "Left": "L"}
         for side in ("Right", "Left"):
+            hs_src = event_sources.get(side, {}).get("HS", {})
+            to_src = event_sources.get(side, {}).get("TO", {})
             for n, t in enumerate(sorted(hs_by_side.get(side, [])), start=1):
-                ev = TrialEvent(t, "IC_{} #{}".format(side_abbr[side], n), "Gait")
+                ev = TrialEvent(t, "IC_{} #{}".format(side_abbr[side], n), "Gait",
+                                 source=hs_src.get(t, ""))
                 self._model.extra_events.append(ev)
                 self._model.events.append(ev)
                 self._controller.top.add_event(ev)
             for n, t in enumerate(sorted(to_by_side.get(side, [])), start=1):
-                ev = TrialEvent(t, "TO_{} #{}".format(side_abbr[side], n), "Gait")
+                ev = TrialEvent(t, "TO_{} #{}".format(side_abbr[side], n), "Gait",
+                                 source=to_src.get(t, ""))
                 self._model.extra_events.append(ev)
                 self._model.events.append(ev)
                 self._controller.top.add_event(ev)
         self._model.events.sort(key=lambda e: e.time_s)
         self._controller._refresh_event_tree()
+        # _refresh_event_tree() just rebuilt the Events node from scratch,
+        # losing any crop dimming it had -- reapply it to match whatever
+        # crop is currently active (or none).
+        self._sync_crop_visuals()
 
     def _current_hs_to_by_side(self):
         """Read the trial's current Gait-context events (whichever mix of
@@ -694,11 +1094,17 @@ class GaitAnalysisDialog(QDialog):
         {"Right": [t, ...], "Left": [t, ...]} shape for HS and TO -- the
         source of truth Save/Create Report build their per-cycle
         calculations from, instead of a possibly-stale cached detection
-        result."""
+        result. Also returns hs_source_by_side/to_source_by_side ({"Right":
+        {t: "plate"/"marker"/""}, "Left": {...}}) for the verified-cycles-
+        only toggle, the Manual Cycles editor's row coloring, and the HS-to-
+        opposite-TO fallback cycle (see gait_events.cycles_from_hs_or_
+        fallback)."""
         hs_by_side = {"Right": [], "Left": []}
         to_by_side = {"Right": [], "Left": []}
+        hs_source_by_side = {"Right": {}, "Left": {}}
+        to_source_by_side = {"Right": {}, "Left": {}}
         if self._model is None:
-            return hs_by_side, to_by_side
+            return hs_by_side, to_by_side, hs_source_by_side, to_source_by_side
         for ev in self._model.extra_events:
             if ev.context != "Gait":
                 continue
@@ -708,15 +1114,23 @@ class GaitAnalysisDialog(QDialog):
             kind, abbr = base.split("_")
             side = "Right" if abbr == "R" else "Left"
             (hs_by_side if kind == "IC" else to_by_side)[side].append(ev.time_s)
+            if kind == "IC":
+                hs_source_by_side[side][ev.time_s] = ev.source
+            else:
+                to_source_by_side[side][ev.time_s] = ev.source
         for d in (hs_by_side, to_by_side):
             for side in d:
                 d[side].sort()
-        return hs_by_side, to_by_side
+        return hs_by_side, to_by_side, hs_source_by_side, to_source_by_side
 
     # ── Manual gait-event correction ─────────────────────────────────────────
 
     def _on_manual_gait_events(self):
         if self._model is None:
+            return
+        if self._manual_events_dlg is not None:
+            self._manual_events_dlg.raise_()
+            self._manual_events_dlg.activateWindow()
             return
 
         existing = []
@@ -725,10 +1139,22 @@ class GaitAnalysisDialog(QDialog):
                 continue
             event_type = ev.label.split(" #")[0]
             if event_type in _GAIT_EVENT_TYPES:
-                existing.append((event_type, ev.time_s))
+                existing.append((event_type, ev.time_s, ev.source))
 
         dlg = _ManualGaitEventsDialog(existing, self._model.total_time(), self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        # Non-modal and shown rather than exec()'d: exec() would disable this
+        # whole window (playbar included) until the dialog closes, but the
+        # point of this editor is to let the user play/scrub the trial below
+        # and type in event times as they go.
+        dlg.setModal(False)
+        dlg.finished.connect(self._on_manual_gait_events_finished)
+        self._manual_events_dlg = dlg
+        dlg.show()
+
+    def _on_manual_gait_events_finished(self, result):
+        dlg = self._manual_events_dlg
+        self._manual_events_dlg = None
+        if dlg is None or result != QDialog.DialogCode.Accepted:
             return
         rows, errors = dlg.rows()
         if errors:
@@ -746,7 +1172,14 @@ class GaitAnalysisDialog(QDialog):
             (hs_by_side if kind == "IC" else to_by_side)[side].append(t)
 
         self._apply_gait_events(hs_by_side, to_by_side)
-        self._results.setPlainText(self._format_manual_results(hs_by_side, to_by_side))
+        if self._last_detect_meta is not None:
+            # A prior "Detect Gait Events" run already cached the marker
+            # arrays/heel-toe labels _compute_gait_metrics needs, so the
+            # full panel (steps/stride/phase/CCI) can be rebuilt right away
+            # instead of just showing the raw edited event list.
+            self._refresh_results()
+        else:
+            self._results.setPlainText(self._format_manual_results(hs_by_side, to_by_side))
 
     @staticmethod
     def _format_manual_results(hs_by_side, to_by_side):
@@ -766,6 +1199,122 @@ class GaitAnalysisDialog(QDialog):
             "click \"Detect Gait Events\" to refresh them."
         )
         return "\n".join(lines)
+
+    # ── Co-contraction Index pairs ───────────────────────────────────────────
+
+    def _on_cci_pairs(self):
+        if self._profile is None:
+            return
+        dlg = _CCIPairsDialog(self._profile.emg.Channels, self._cci_pairs, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._cci_pairs = dlg.pairs()
+        self._show_cci_results()
+
+    def _show_cci_results(self):
+        """Historical name for "rebuild the results panel" -- kept as the
+        slot wired to the CCI-pairs-picker and the verified-only-cycles
+        checkbox (see __init__/_on_cci_pairs) since Co-contraction Index is
+        just one section of _build_results_text now."""
+        self._refresh_results()
+
+    # ── Crop ──────────────────────────────────────────────────────────────────
+
+    def _on_crop_toggled(self, checked):
+        if self._model is None:
+            self._crop_btn.setChecked(False)
+            return
+        if checked:
+            t0, t1 = self._profile.crop_interval or (0.0, self._model.total_time())
+            self._plot.set_crop_mode(True, (t0, t1))
+            self._crop_status_label.setText(self.tr(
+                "Drag the shaded region on the plot(s) below, then Apply Crop or Cancel."
+            ))
+            self._crop_apply_btn.setVisible(True)
+            self._crop_cancel_btn.setVisible(True)
+            self._crop_clear_btn.setVisible(False)
+            self._sync_crop_visuals((t0, t1))
+            self._refresh_results(crop_override=(t0, t1))
+        else:
+            self._crop_preview_timer.stop()
+            self._pending_crop_preview = None
+            self._plot.set_crop_mode(False)
+            self._crop_apply_btn.setVisible(False)
+            self._crop_cancel_btn.setVisible(False)
+            self._update_crop_status_label()
+            self._sync_crop_visuals()
+            self._refresh_results()
+
+    def _on_crop_range_dragged(self, t0, t1):
+        """Live preview while the crop region is being dragged (see
+        PlayPlotWidget.cropRangeChanged, connected once in __init__) --
+        recomputes and shows results for the range being dragged without
+        touching profile.crop_interval, so Cancel can still discard it.
+
+        The event-line/tree-dimming sync (_sync_crop_visuals) happens right
+        away, every time -- just restyling existing items, cheap regardless
+        of drag frequency. The results-panel recompute is debounced via
+        _crop_preview_timer instead: pyqtgraph emits this on every mouse-
+        move while dragging, and _compute_gait_metrics/CCI (which filters
+        full EMG envelopes) is heavy enough that running it synchronously on
+        each one blocked the main thread long enough to make the region's
+        own drag rendering visibly lag."""
+        if not self._crop_btn.isChecked():
+            return
+        self._sync_crop_visuals((t0, t1))
+        self._pending_crop_preview = (t0, t1)
+        self._crop_preview_timer.start(120)
+
+    def _apply_pending_crop_preview(self):
+        if self._pending_crop_preview is not None:
+            self._refresh_results(crop_override=self._pending_crop_preview)
+
+    def _sync_crop_visuals(self, range_override=None):
+        """Keep the plot's event-line visibility and the tree's Events-group
+        dimming in sync with the current (or previewed) crop range -- see
+        PlayPlotWidget.set_crop_event_filter / _apply_crop_dim_to_event_tree.
+        Cheap enough to run on every drag signal, unlike the heavier
+        results-panel recompute (_on_crop_range_dragged/_crop_preview_timer)."""
+        rng = range_override if range_override is not None else (
+            self._profile.crop_interval if self._profile is not None else None
+        )
+        self._plot.set_crop_event_filter(rng)
+        _apply_crop_dim_to_event_tree(self._label_tree, rng)
+
+    def _on_crop_apply(self):
+        rng = self._plot.get_crop_range_s()
+        if rng is not None:
+            self._profile.crop_interval = rng
+        self._crop_btn.setChecked(False)
+
+    def _on_crop_cancel(self):
+        self._crop_btn.setChecked(False)
+
+    def _on_crop_clear(self):
+        self._profile.crop_interval = None
+        self._update_crop_status_label()
+        self._sync_crop_visuals()
+        self._refresh_results()
+
+    def _update_crop_status_label(self):
+        ci = self._profile.crop_interval if self._profile is not None else None
+        if ci:
+            self._crop_status_label.setText(self.tr("Crop: {:.3f}s - {:.3f}s").format(ci[0], ci[1]))
+            self._crop_clear_btn.setVisible(True)
+        else:
+            self._crop_status_label.setText(self.tr("Crop: none"))
+            self._crop_clear_btn.setVisible(False)
+
+    @staticmethod
+    def _filter_hs_by_crop(hs_by_side, crop_interval):
+        """Keep only HS times inside profile.crop_interval, non-destructively
+        -- detection still runs (and Manual Cycles still shows) the whole
+        trial; only the calculated parameters are restricted to the cropped
+        segment. No-op when no crop is set."""
+        if not crop_interval:
+            return hs_by_side
+        t0, t1 = crop_interval
+        return {side: [t for t in times if t0 <= t <= t1] for side, times in hs_by_side.items()}
 
     # ── Filter settings ──────────────────────────────────────────────────────
 
@@ -835,6 +1384,20 @@ class GaitAnalysisDialog(QDialog):
 
         self._profile.emg.renameChannel(old_name, new_name)
         _populate_label_tree(self._label_tree, self._profile)
+        # Co-contraction pairs and per-channel side assignments are cached
+        # by channel name (see self._cci_pairs / self._emg_channel_side) --
+        # without this they'd keep pointing at a name that no longer exists,
+        # silently going stale (or making _CCIPairsDialog fall back to a
+        # different channel next time it's reopened) instead of following
+        # the rename like the tree does.
+        self._cci_pairs = [
+            (new_name if a == old_name else a, new_name if b == old_name else b,
+             side, method_key, norm_key)
+            for a, b, side, method_key, norm_key in self._cci_pairs
+        ]
+        if old_name in self._emg_channel_side:
+            self._emg_channel_side[new_name] = self._emg_channel_side.pop(old_name)
+        self._show_cci_results()
 
     # ── Save (CSV export) ────────────────────────────────────────────────────
 
@@ -856,6 +1419,114 @@ class GaitAnalysisDialog(QDialog):
     def _fmt(value):
         return "" if value is None or (isinstance(value, float) and np.isnan(value)) else "{:.4f}".format(value)
 
+    @staticmethod
+    def _mean_sd_list(values):
+        return (float(np.mean(values)), float(np.std(values))) if values else (float("nan"), float("nan"))
+
+    @staticmethod
+    def _filter_verified_hs(hs_by_side, hs_source_by_side):
+        """Keep only HS times whose initial contact came from a force plate
+        (see gait_events._merge_side_events) -- used when the "Force-plate-
+        verified cycles only" checkbox is on. A side with no plate-sourced
+        HS at all ends up with an empty list here, which downstream
+        (pair_hs_to/cycles_from_hs) correctly turns into real NaN/empty
+        results rather than a fabricated number -- a single- or two-plate
+        lab often just doesn't have enough verified footfalls for a full
+        cycle-to-cycle metric, and that's real, not a bug."""
+        return {
+            side: [t for t in times if hs_source_by_side.get(side, {}).get(t) == "plate"]
+            for side, times in hs_by_side.items()
+        }
+
+    def _compute_gait_metrics(self, verified_only=False, crop_override=None):
+        """Shared by Save, Create Report, and the live results panel: read
+        the trial's current event set, recover real same-foot HS/TO pairs
+        (see pair_hs_to -- needed for phase-percentage and toe-out-angle
+        math, not just cadence/length), and compute spatiotemporal +
+        phase-percentage + toe-out metrics.
+
+        crop_override, when given, is used instead of profile.crop_interval
+        -- lets the results panel preview a crop range still being dragged
+        (see _on_crop_range_dragged) without committing it.
+
+        Returns (hs_by_side, to_by_side, kin, fs_k, spatio, phases, toe_out,
+        step_agg). to_by_side is included (crop/verified-only filtered the
+        same way as hs_by_side) for the HS-to-opposite-TO fallback cycle
+        used by EMG/CCI when a side has no verified same-foot HS-HS cycle
+        (see gait_events.cycles_from_hs_or_fallback).
+        """
+        hs_by_side, to_by_side, hs_source_by_side, to_source_by_side = self._current_hs_to_by_side()
+        crop = crop_override if crop_override is not None else self._profile.crop_interval
+        hs_by_side = self._filter_hs_by_crop(hs_by_side, crop)
+        to_by_side = self._filter_hs_by_crop(to_by_side, crop)
+        if verified_only:
+            hs_by_side = self._filter_verified_hs(hs_by_side, hs_source_by_side)
+            to_by_side = self._filter_verified_hs(to_by_side, to_source_by_side)
+        kin = self._profile.kinematic
+        fs_k = kin.point_fs
+        heel = self._last_heel_toe_labels
+        events_by_side = {
+            side: _gait.pair_hs_to(hs_by_side[side], to_by_side[side]) for side in ("Right", "Left")
+        }
+        spatio = _gait.compute_spatiotemporals(
+            events_by_side, self._last_marker_xyz_by_label, fs_k,
+            right_heel_label=heel.get("right_heel", "RHEE"),
+            left_heel_label=heel.get("left_heel", "LHEE"),
+        )
+        phases = _gait.compute_phase_percentages(events_by_side, to_by_side)
+
+        forward_axis_idx = 0 if spatio["forward_axis"] == "X" else 1
+        toe_out = {}
+        for side, heel_key, toe_key in (
+            ("Right", "right_heel", "right_toe"), ("Left", "left_heel", "left_toe"),
+        ):
+            heel_label = heel.get(heel_key)
+            toe_label = heel.get(toe_key)
+            if heel_label and toe_label:
+                toe_out[side] = _gait.compute_toe_out_angles(
+                    events_by_side[side], self._last_marker_xyz_by_label, fs_k,
+                    heel_label, toe_label, forward_axis_idx, mirror=(side == "Left"),
+                )
+            else:
+                toe_out[side] = (float("nan"), float("nan"))
+
+        step_agg = _gait.aggregate_steps(spatio["steps"])
+
+        return hs_by_side, to_by_side, kin, fs_k, spatio, phases, toe_out, step_agg
+
+    @staticmethod
+    def _phases_all_nan(phases):
+        for side in ("Right", "Left"):
+            for key in ("stance_pct", "swing_pct", "loading_response_pct",
+                        "pre_swing_pct", "single_support_pct"):
+                if not np.isnan(phases[side][key][0]):
+                    return False
+        return True
+
+    def _warn_if_verified_only_too_sparse(self, phases):
+        """A 1-2-plate lab typically only verifies one footfall per foot --
+        not enough to form a single HS-to-next-HS cycle. Gait Phase
+        Parameters/the illustration fall back to the same approximate HS-to-
+        opposite-foot-TO window EMG/CCI already use in that case (see
+        gait_events.compute_phase_percentages's to_by_side fallback), so
+        this only fires when even that isn't possible (e.g. no verified
+        contact at all on one foot) -- without it, a mostly-empty report
+        with "Force-plate-verified cycles only" checked looks like something
+        broke rather than like real data ran out."""
+        if self._verified_only_check.isChecked() and self._phases_all_nan(phases):
+            QMessageBox.information(
+                self, self.tr("Force-plate-verified cycles only"),
+                self.tr(
+                    "This trial doesn't have enough force-plate-verified footfalls "
+                    "to compute Gait Phase Parameters or the gait-cycle illustration "
+                    "for either foot -- not even the approximate HS-to-opposite-foot-"
+                    "TO window EMG/CCI can fall back to. Step-level Spatial/Time "
+                    "metrics (which need just one verified contact per foot) are "
+                    "unaffected. Uncheck the box to use all detected cycles instead."
+                ),
+                QMessageBox.Ok,
+            )
+
     def _on_save_csv(self):
         if self._model is None:
             return
@@ -867,25 +1538,17 @@ class GaitAnalysisDialog(QDialog):
         if not path.lower().endswith(".csv"):
             path += ".csv"
 
-        hs_by_side, _to_by_side = self._current_hs_to_by_side()
-        kin = self._profile.kinematic
-        fs_k = kin.point_fs
-        heel = self._last_heel_toe_labels
-        # "to" isn't read by compute_spatiotemporals -- see its docstring --
-        # so pairing each HS with itself is a safe stand-in when the current
-        # event set came from a manual edit with no real TO pairing.
-        events_by_side = {side: [(t, t) for t in hs_by_side[side]] for side in ("Right", "Left")}
-        spatio = _gait.compute_spatiotemporals(
-            events_by_side, self._last_marker_xyz_by_label, fs_k,
-            right_heel_label=heel.get("right_heel", "RHEE"),
-            left_heel_label=heel.get("left_heel", "LHEE"),
+        hs_by_side, to_by_side, kin, fs_k, spatio, phases, toe_out, step_agg = self._compute_gait_metrics(
+            verified_only=self._verified_only_check.isChecked(),
         )
+        self._warn_if_verified_only_too_sparse(phases)
 
         try:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                self._write_gait_parameters_csv(writer, spatio)
-                self._write_emg_cycle_metrics_csv(writer, hs_by_side)
+                self._write_gait_parameters_csv(writer, spatio, phases, toe_out, step_agg)
+                self._write_emg_cycle_metrics_csv(writer, hs_by_side, to_by_side)
+                self._write_cci_csv(writer, hs_by_side, to_by_side)
                 self._write_joint_angle_csv(writer, hs_by_side, kin, fs_k)
         except OSError as e:
             QMessageBox.critical(self, self.tr("error"), str(e), QMessageBox.Ok)
@@ -896,31 +1559,86 @@ class GaitAnalysisDialog(QDialog):
             self.tr("Saved to '{}'.").format(path), QMessageBox.Ok,
         )
 
-    def _write_gait_parameters_csv(self, writer, spatio):
+    def _write_gait_parameters_csv(self, writer, spatio, phases, toe_out, step_agg):
         writer.writerow(["Gait Parameters -- Steps"])
-        writer.writerow(["Side", "HS Time (s)", "Step Length (m)", "Step Time (s)", "Cadence (steps/min)"])
+        writer.writerow([
+            "Side", "HS Time (s)", "Step Length (m)", "Step Width (m)",
+            "Step Time (s)", "Cadence (steps/min)",
+        ])
         for step in spatio["steps"]:
             writer.writerow([
                 step["side"], "{:.3f}".format(step["hs_t"]),
-                self._fmt(step["step_length_m"]), "{:.3f}".format(step["step_time_s"]),
-                self._fmt(step["cadence_spm"]),
+                self._fmt(step["step_length_m"]), self._fmt(step["step_width_m"]),
+                "{:.3f}".format(step["step_time_s"]), self._fmt(step["cadence_spm"]),
             ])
         writer.writerow([])
 
-        writer.writerow(["Gait Parameters -- Stride"])
-        writer.writerow(["Side", "Stride Length (m)", "Stride Time (s)", "Cadence (strides/min)", "Velocity (m/s)"])
+        writer.writerow(["Gait Parameters -- Stride (mean +/- SD across cycles)"])
+        writer.writerow([
+            "Side", "Stride Length Mean (m)", "Stride Length SD",
+            "Stride Time Mean (s)", "Stride Time SD",
+            "Cadence Mean (strides/min)", "Cadence SD",
+            "Velocity Mean (m/s)", "Velocity SD",
+        ])
         for side in ("Right", "Left"):
             s = spatio["stride"][side]
-            writer.writerow([
-                side, self._fmt(s["stride_length_m"]), self._fmt(s["stride_time_s"]),
-                self._fmt(s["cadence_spm"]), self._fmt(s["velocity_m_s"]),
-            ])
+            row = [side]
+            for key in ("stride_length_m", "stride_time_s", "cadence_spm", "velocity_m_s"):
+                mean, sd = s[key]
+                row.extend([self._fmt(mean), self._fmt(sd)])
+            writer.writerow(row)
         writer.writerow([])
 
-    def _write_emg_cycle_metrics_csv(self, writer, hs_by_side):
+        writer.writerow(["Gait Phase Parameters (mean +/- SD across cycles, % of gait cycle)"])
+        writer.writerow(["Parameter", "Right Mean", "Right SD", "Left Mean", "Left SD"])
+        for key, label in (
+            ("stance_pct", "Stance Phase"),
+            ("loading_response_pct", "Loading Response"),
+            ("single_support_pct", "Single Support"),
+            ("pre_swing_pct", "Pre-Swing"),
+            ("swing_pct", "Swing Phase"),
+        ):
+            r_mean, r_sd = phases["Right"][key]
+            l_mean, l_sd = phases["Left"][key]
+            writer.writerow([label, self._fmt(r_mean), self._fmt(r_sd), self._fmt(l_mean), self._fmt(l_sd)])
+        ds_mean, ds_sd = phases["double_support_pct"]
+        writer.writerow(["Double Support (combined, both feet)", self._fmt(ds_mean), self._fmt(ds_sd), "", ""])
+        is_fallback = phases.get("is_fallback", {})
+        for side in ("Right", "Left"):
+            if is_fallback.get(side):
+                writer.writerow([
+                    "Note: {} phase percentages use an approximate HS-to-opposite-foot-TO "
+                    "window (not a verified full HS-to-HS gait cycle)".format(side)
+                ])
+        writer.writerow([])
+
+        writer.writerow(["Gait Spatial Parameters -- Step Summary (mean +/- SD across steps)"])
+        writer.writerow([
+            "Side", "Step Length Mean (m)", "Step Length SD",
+            "Step Time Mean (s)", "Step Time SD",
+            "Cadence Mean (steps/min)", "Cadence SD",
+        ])
+        for side in ("Right", "Left"):
+            row = [side]
+            for key in ("step_length_m", "step_time_s", "cadence_spm"):
+                mean, sd = step_agg[side][key]
+                row.extend([self._fmt(mean), self._fmt(sd)])
+            writer.writerow(row)
+        w_mean, w_sd = step_agg["step_width_m"]
+        writer.writerow(["Step Width (combined)", self._fmt(w_mean), self._fmt(w_sd), "", "", "", ""])
+        writer.writerow([])
+
+        writer.writerow(["Gait Spatial Parameters -- Toe-out Angle (deg, mean +/- SD)"])
+        writer.writerow(["Side", "Mean", "SD"])
+        for side in ("Right", "Left"):
+            mean, sd = toe_out[side]
+            writer.writerow([side, self._fmt(mean), self._fmt(sd)])
+        writer.writerow([])
+
+    def _write_emg_cycle_metrics_csv(self, writer, hs_by_side, to_by_side):
         writer.writerow(["EMG Metrics per Gait Cycle"])
         writer.writerow(["Channel", "Side", "Cycle", "Cycle Start (s)", "Cycle End (s)",
-                          "Mean Envelope", "Peak Envelope"])
+                          "Mean Envelope", "Peak Envelope", "Approximate Cycle"])
         channels = self._profile.emg.Channels
         if not channels:
             writer.writerow(["(no EMG channels loaded for this trial)"])
@@ -930,16 +1648,46 @@ class GaitAnalysisDialog(QDialog):
             envelope, fs_emg = self._emg_envelope(chan)
             if len(envelope) == 0:
                 continue
+            chan_side = self._emg_channel_side.get(chan, "Unspecified")
             t = np.arange(len(envelope)) / fs_emg
             for side in ("Right", "Left"):
-                for i, (t0, t1) in enumerate(_gait.cycles_from_hs(hs_by_side[side]), start=1):
+                if chan_side not in ("Unspecified", side):
+                    continue
+                opposite = "Left" if side == "Right" else "Right"
+                cycles, is_fallback = _gait.cycles_from_hs_or_fallback(
+                    hs_by_side[side], to_by_side[opposite],
+                )
+                for i, (t0, t1) in enumerate(cycles, start=1):
                     seg = envelope[(t >= t0) & (t < t1)]
                     if len(seg) == 0:
                         continue
                     writer.writerow([
                         chan, side, i, "{:.3f}".format(t0), "{:.3f}".format(t1),
                         "{:.5f}".format(seg.mean()), "{:.5f}".format(seg.max()),
+                        "yes" if is_fallback else "",
                     ])
+        writer.writerow([])
+
+    def _write_cci_csv(self, writer, hs_by_side, to_by_side):
+        writer.writerow(["Muscle Co-contraction Index"])
+        writer.writerow(["Muscle A", "Muscle B", "Side", "Method", "Normalization",
+                          "CCI", "Approximate Cycle"])
+        if not self._cci_pairs:
+            writer.writerow(["(no Co-contraction pairs configured -- see \"Co-contraction...\" button)"])
+            writer.writerow([])
+            return
+        for a_name, b_name, side, method_key, norm_key in self._cci_pairs:
+            a_env, a_fs = self._emg_envelope(a_name)
+            b_env, b_fs = self._emg_envelope(b_name)
+            cci, is_fallback = _gait.compute_cci_pair(
+                a_name, a_env, a_fs, b_name, b_env, b_fs, hs_by_side, to_by_side,
+                side, method_key, norm_key,
+            )
+            writer.writerow([
+                a_name, b_name, side, _CCI_METHOD_LABELS.get(method_key, method_key),
+                _CCI_NORMALIZE_LABELS.get(norm_key, norm_key),
+                self._fmt(cci), "yes" if is_fallback else "",
+            ])
         writer.writerow([])
 
     def _write_joint_angle_csv(self, writer, hs_by_side, kin, fs_k):
@@ -970,76 +1718,185 @@ class GaitAnalysisDialog(QDialog):
     def _on_create_report(self):
         if self._model is None:
             return
-        hs_by_side, _to_by_side = self._current_hs_to_by_side()
-        kin = self._profile.kinematic
-        fs_k = kin.point_fs
-        heel = self._last_heel_toe_labels
-        events_by_side = {side: [(t, t) for t in hs_by_side[side]] for side in ("Right", "Left")}
-        spatio = _gait.compute_spatiotemporals(
-            events_by_side, self._last_marker_xyz_by_label, fs_k,
-            right_heel_label=heel.get("right_heel", "RHEE"),
-            left_heel_label=heel.get("left_heel", "LHEE"),
+        hs_by_side, to_by_side, kin, fs_k, spatio, phases, toe_out, step_agg = self._compute_gait_metrics(
+            verified_only=self._verified_only_check.isChecked(),
         )
+        self._warn_if_verified_only_too_sparse(phases)
 
-        emg_means = {}
+        # Pre-computed once and handed to the report -- both the EMG activity
+        # bar chart and the Co-contraction Index pairs (picked ahead of time
+        # via the toolbar's "Co-contraction..." button, see _on_cci_pairs)
+        # work off the same enveloped signals rather than recomputing per
+        # channel.
+        emg_envelopes = {}
         for chan in self._profile.emg.Channels:
             envelope, fs_emg = self._emg_envelope(chan)
-            if len(envelope) == 0:
-                continue
-            t = np.arange(len(envelope)) / fs_emg
-            all_cycles = _gait.cycles_from_hs(hs_by_side["Right"]) + _gait.cycles_from_hs(hs_by_side["Left"])
-            segs = [envelope[(t >= t0) & (t < t1)] for t0, t1 in all_cycles]
-            segs = [s for s in segs if len(s) > 0]
-            if segs:
-                emg_means[chan] = float(np.mean([s.mean() for s in segs]))
+            if len(envelope) > 0:
+                emg_envelopes[chan] = (envelope, fs_emg)
 
-        dlg = _GaitReportDialog(spatio, hs_by_side, kin, fs_k, emg_means, self)
+        # A fresh, one-off pick every time -- not remembered, not shared with
+        # the Co-contraction pair picker (which has its own Side column --
+        # see _CCIPairsDialog). Channel->side IS persisted across reopens
+        # (self._emg_channel_side) so re-generating a report doesn't make
+        # you re-answer "which leg is this sensor on" every time.
+        #
+        # Kept per-side rather than pooling Right+Left cycles into one number
+        # -- a "gait cycle" here is IC of one foot to the next IC of that
+        # SAME foot (see cycles_from_hs), matching how phases/CCI/joint
+        # angles are all computed elsewhere in this report; blending both
+        # feet's cycles together would mix two different feet's muscle
+        # activity into one meaningless average. A channel recorded on only
+        # one leg (side != "Unspecified") only gets that side's bar -- the
+        # other side is left NaN rather than computed from the wrong leg's
+        # sensor.
+        emg_means = {}
+        if emg_envelopes:
+            channel_dlg = _EMGReportChannelsDialog(
+                list(emg_envelopes.keys()), self, existing_sides=self._emg_channel_side,
+            )
+            if channel_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            self._emg_channel_side.update(channel_dlg.sides())
+            selection = channel_dlg.selection()
+            for orig_name, display_name, chan_side in selection:
+                envelope, fs_emg = emg_envelopes[orig_name]
+                t = np.arange(len(envelope)) / fs_emg
+                side_means = {}
+                for side in ("Right", "Left"):
+                    if chan_side not in ("Unspecified", side):
+                        side_means[side] = (float("nan"), float("nan"))
+                        continue
+                    opposite = "Left" if side == "Right" else "Right"
+                    cycles, _is_fallback = _gait.cycles_from_hs_or_fallback(
+                        hs_by_side[side], to_by_side[opposite],
+                    )
+                    cycle_means = []
+                    for t0, t1 in cycles:
+                        seg = envelope[(t >= t0) & (t < t1)]
+                        if len(seg) > 0:
+                            cycle_means.append(float(seg.mean()))
+                    side_means[side] = self._mean_sd_list(cycle_means)
+                emg_means[display_name] = side_means
+
+        dlg = _GaitReportDialog(
+            spatio, phases, toe_out, step_agg, hs_by_side, to_by_side, kin, fs_k,
+            emg_means, emg_envelopes, self._cci_pairs, self,
+        )
         dlg.exec()
 
-    @staticmethod
-    def _format_results(result, right_heel, left_heel, right_toe, left_toe):
+    def _refresh_results(self, crop_override=None):
+        """Rebuild the whole results panel from the trial's *current* live
+        state -- called after detection, a manual edit, a rename, a crop
+        change (applied or previewed), the verified-only toggle, or the CCI
+        pairs picker, so the panel never shows numbers computed under a
+        setting that no longer holds (see _build_results_text)."""
+        self._results.setPlainText(self._build_results_text(crop_override))
+
+    def _build_results_text(self, crop_override=None):
+        """Full contents of the results panel: the header captured at the
+        last "Detect Gait Events" run, plus spatiotemporal/phase/toe-out and
+        Co-contraction Index recomputed fresh from whatever crop/verified-
+        only/CCI-pairs settings are live right now -- same math and same
+        crop_override preview mechanism Save/Create Report use (see
+        _compute_gait_metrics). Returns "" before any detection has run."""
+        if self._model is None or self._last_detect_meta is None:
+            return ""
+        meta = self._last_detect_meta
+        hs_by_side, to_by_side, kin, fs_k, spatio, phases, toe_out, step_agg = self._compute_gait_metrics(
+            verified_only=self._verified_only_check.isChecked(), crop_override=crop_override,
+        )
+
         lines = [
-            "Source: {}".format(result["source"]),
-            "Forward axis (inferred): {}".format(result["forward_axis"]),
+            "Source: {}".format(meta["source"]),
+            "Forward axis (inferred): {}".format(meta["forward_axis"]),
             "Markers used: RHeel={}, LHeel={}, RToe={}, LToe={}".format(
-                right_heel, left_heel, right_toe, left_toe
+                meta["right_heel"], meta["left_heel"], meta["right_toe"], meta["left_toe"]
             ),
             "",
         ]
         for side in ("Right", "Left"):
             lines.append("{} IC ({}): {}".format(
-                side, len(result["HS"][side]),
-                ", ".join("{:.3f}s".format(t) for t in result["HS"][side]),
+                side, len(hs_by_side[side]),
+                ", ".join("{:.3f}s".format(t) for t in hs_by_side[side]),
             ))
             lines.append("{} TO ({}): {}".format(
-                side, len(result["TO"][side]),
-                ", ".join("{:.3f}s".format(t) for t in result["TO"][side]),
+                side, len(to_by_side[side]),
+                ", ".join("{:.3f}s".format(t) for t in to_by_side[side]),
             ))
 
         lines.append("")
         lines.append("Steps:")
-        for step in result["steps"]:
+        for step in spatio["steps"]:
             lines.append(
                 "  {side} @ {hs_t:.3f}s -- length {step_length_m:.3f} m, "
                 "time {step_time_s:.3f} s, cadence {cadence_spm:.1f} steps/min".format(**step)
             )
 
         lines.append("")
-        lines.append("Stride:")
+        lines.append("Stride (mean +/- SD across cycles):")
         for side in ("Right", "Left"):
-            s = result["stride"][side]
+            s = spatio["stride"][side]
             lines.append(
-                "  {side}: length {stride_length_m:.3f} m, time {stride_time_s:.3f} s, "
-                "cadence {cadence_spm:.1f} strides/min, velocity {velocity_m_s:.3f} m/s".format(
-                    side=side, **s
+                "  {side}: length {0[0]:.3f}+/-{0[1]:.3f} m, time {1[0]:.3f}+/-{1[1]:.3f} s, "
+                "cadence {2[0]:.1f}+/-{2[1]:.1f} strides/min, velocity {3[0]:.3f}+/-{3[1]:.3f} m/s".format(
+                    s["stride_length_m"], s["stride_time_s"], s["cadence_spm"], s["velocity_m_s"],
+                    side=side,
                 )
             )
 
-        if result["warnings"]:
+        lines.append("")
+        lines.append("Gait Phase (% of cycle, mean +/- SD):")
+        for side in ("Right", "Left"):
+            p = phases[side]
+            lines.append(
+                "  {side}: stance {stance_pct[0]:.1f}+/-{stance_pct[1]:.1f}, "
+                "swing {swing_pct[0]:.1f}+/-{swing_pct[1]:.1f}, "
+                "loading resp. {loading_response_pct[0]:.1f}+/-{loading_response_pct[1]:.1f}, "
+                "single support {single_support_pct[0]:.1f}+/-{single_support_pct[1]:.1f}, "
+                "pre-swing {pre_swing_pct[0]:.1f}+/-{pre_swing_pct[1]:.1f}".format(side=side, **p)
+            )
+        ds_mean, ds_sd = phases["double_support_pct"]
+        lines.append("  Double support (combined): {:.1f}+/-{:.1f}".format(ds_mean, ds_sd))
+
+        lines.append("")
+        lines.append("Toe-out angle (deg, mean +/- SD):")
+        for side in ("Right", "Left"):
+            mean, sd = toe_out[side]
+            lines.append("  {}: {:.1f}+/-{:.1f}".format(side, mean, sd))
+
+        if meta["warnings"]:
             lines.append("")
             lines.append("Warnings:")
-            for w in result["warnings"]:
+            for w in meta["warnings"]:
                 lines.append("  - " + w)
+
+        if self._cci_pairs:
+            lines.append("")
+            lines.append("Co-contraction Index:")
+            for a_name, b_name, side, method_key, norm_key in self._cci_pairs:
+                a_env, a_fs = self._emg_envelope(a_name)
+                b_env, b_fs = self._emg_envelope(b_name)
+                cci, is_fallback = _gait.compute_cci_pair(
+                    a_name, a_env, a_fs, b_name, b_env, b_fs, hs_by_side, to_by_side,
+                    side, method_key, norm_key,
+                )
+                method_label = _CCI_METHOD_LABELS.get(method_key, method_key)
+                norm_label = _CCI_NORMALIZE_LABELS.get(norm_key, norm_key)
+                value_txt = "n/a" if np.isnan(cci) else "{:.3f}".format(cci)
+                fallback_txt = (
+                    " [approximate: HS-to-opposite-TO window, not a verified full cycle]"
+                    if is_fallback else ""
+                )
+                lines.append("  {} vs {} ({}, {}, {}): {}{}".format(
+                    a_name, b_name, side, method_label, norm_label, value_txt, fallback_txt,
+                ))
+
+        if crop_override is not None:
+            lines.append("")
+            lines.append(
+                "(Previewing crop {:.3f}s - {:.3f}s -- \"Apply Crop\" to keep it, "
+                "\"Cancel\" to discard)".format(*crop_override)
+            )
 
         return "\n".join(lines)
 

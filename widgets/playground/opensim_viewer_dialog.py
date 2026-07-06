@@ -60,6 +60,8 @@ class OpenSimViewerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(self.tr("OpenSim Model Viewer"))
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinimizeButtonHint
+                             | Qt.WindowType.WindowMaximizeButtonHint)
         self.resize(1000, 640)
 
         self._model = None
