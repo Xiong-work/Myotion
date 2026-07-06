@@ -17,6 +17,8 @@ class C3dConvertDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(self.tr("C3D -> TRC/MOT Converter"))
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinimizeButtonHint
+                             | Qt.WindowType.WindowMaximizeButtonHint)
         self.resize(720, 560)
 
         self._input_folder = None

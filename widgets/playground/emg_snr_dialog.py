@@ -5,6 +5,7 @@ import os
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QComboBox,
     QFileDialog, QTableWidget, QTableWidgetItem, QMessageBox, QSplitter,
@@ -16,11 +17,33 @@ from modules.playground.emg_snr import load_signal, compute_snr, EmgSnrError, DE
 _BASELINE_COLOR = "#3498db"
 _ACTIVE_COLOR = "#e67e22"
 
+# General surface-EMG SNR quality bands (amplitude-ratio dB, see
+# modules.playground.emg_snr.compute_snr) -- a widely-cited rule of thumb
+# for RMS-ratio SNR, not a validated diagnostic threshold: below ~10 dB the
+# signal is dominated by noise/crosstalk, 10-20 dB is usable but marginal,
+# >= 20 dB is generally considered good quality.
+_SNR_GOOD_DB = 20.0
+_SNR_FAIR_DB = 10.0
+_SNR_GOOD_COLOR = QColor("#2e7d32")
+_SNR_FAIR_COLOR = QColor("#b8860b")
+_SNR_POOR_COLOR = QColor("#c0392b")
+
+
+def _snr_quality(snr_db):
+    """(label, QColor) for snr_db against the good/fair/poor bands above."""
+    if snr_db >= _SNR_GOOD_DB:
+        return "Good", _SNR_GOOD_COLOR
+    if snr_db >= _SNR_FAIR_DB:
+        return "Fair", _SNR_FAIR_COLOR
+    return "Poor", _SNR_POOR_COLOR
+
 
 class EmgSnrDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(self.tr("EMG Signal Quality (SNR)"))
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinimizeButtonHint
+                             | Qt.WindowType.WindowMaximizeButtonHint)
         self.resize(900, 560)
 
         self._tst = None
@@ -36,19 +59,34 @@ class EmgSnrDialog(QDialog):
         top_row.addWidget(self._file_label, 1)
         layout.addLayout(top_row)
 
+        snr_legend = QLabel(
+            self.tr(
+                'Good SNR: <span style="color:{good};font-weight:bold">&ge; {good_db:.0f} dB</span>'
+                '&nbsp;&nbsp;Fair: <span style="color:{fair};font-weight:bold">{fair_db:.0f}-{good_db:.0f} dB</span>'
+                '&nbsp;&nbsp;Poor: <span style="color:{poor};font-weight:bold">&lt; {fair_db:.0f} dB</span>'
+                ' (general guideline, not a validated diagnostic threshold)'
+            ).format(
+                good=_SNR_GOOD_COLOR.name(), fair=_SNR_FAIR_COLOR.name(), poor=_SNR_POOR_COLOR.name(),
+                good_db=_SNR_GOOD_DB, fair_db=_SNR_FAIR_DB,
+            )
+        )
+        snr_legend.setStyleSheet("color: rgba(0,0,0,0.7); font-size: 11px;")
+        layout.addWidget(snr_legend)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         layout.addWidget(splitter, 1)
 
         # Left: channel table
-        self._table = QTableWidget(0, 2)
-        self._table.setHorizontalHeaderLabels([self.tr("Channel"), self.tr("SNR (dB)")])
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels([self.tr("Channel"), self.tr("SNR (dB)"), self.tr("Quality")])
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setMinimumSectionSize(90)
         # A splitter can otherwise squeeze this panel down until the header
         # text itself is clipped (e.g. "Channel" -> "Channe") -- give it a
         # floor wide enough for both headers plus real column content.
-        self._table.setMinimumWidth(220)
+        self._table.setMinimumWidth(280)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.itemSelectionChanged.connect(self._on_row_selected)
@@ -111,10 +149,22 @@ class EmgSnrDialog(QDialog):
             row = self._table.rowCount()
             self._table.insertRow(row)
             self._table.setItem(row, 0, QTableWidgetItem(ch))
-            self._table.setItem(row, 1, QTableWidgetItem(f"{result['snr_db']:.2f}"))
+            self._set_snr_columns(row, result["snr_db"])
 
         if self._table.rowCount() > 0:
             self._table.selectRow(0)
+
+    def _set_snr_columns(self, row, snr_db):
+        """Fill the SNR (dB) and Quality columns for *row*, colored by the
+        good/fair/poor bands (see _snr_quality) -- shared by _on_load and
+        _on_recompute so both stay in sync."""
+        label, color = _snr_quality(snr_db)
+        snr_item = QTableWidgetItem(f"{snr_db:.2f}")
+        snr_item.setForeground(color)
+        self._table.setItem(row, 1, snr_item)
+        quality_item = QTableWidgetItem(label)
+        quality_item.setForeground(color)
+        self._table.setItem(row, 2, quality_item)
 
     def _on_row_selected(self):
         rows = self._table.selectionModel().selectedRows()
@@ -150,4 +200,4 @@ class EmgSnrDialog(QDialog):
             QMessageBox.warning(self, self.tr("Recompute Failed"), str(e))
             return
         self._results[channel] = result
-        self._table.setItem(row, 1, QTableWidgetItem(f"{result['snr_db']:.2f}"))
+        self._set_snr_columns(row, result["snr_db"])

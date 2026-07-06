@@ -52,6 +52,8 @@ class GapFillDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(self.tr("C3D Gap Fill"))
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMinimizeButtonHint
+                             | Qt.WindowType.WindowMaximizeButtonHint)
         self.resize(1250, 750)
 
         self._marker_data = None

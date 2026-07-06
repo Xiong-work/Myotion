@@ -794,7 +794,13 @@ class Controller:
             child_label = "{} | {} | {:.3f}s{}".format(
                 ev.label, ev.context, ev.time_s, source
             )
-            QTreeWidgetItem(root, [child_label])
+            child = QTreeWidgetItem(root, [child_label])
+            # Lets a caller restyle rows by time (e.g. Gait Analysis dimming
+            # events outside the current crop window, see
+            # GaitAnalysisDialog._sync_crop_visuals) without re-parsing the
+            # display text; unused elsewhere, so this is a no-op change for
+            # any other caller of this tree.
+            child.setData(0, Qt.ItemDataRole.UserRole, ev.time_s)
 
         if self.participant_item is not None:
             self.participant_item.addChild(root)
