@@ -371,6 +371,47 @@ class emgConfigure:
                 result.append(emgConfigInfo.nameMap[s.id])
         return result
 
+    @staticmethod
+    def describeStep(s):
+        """Human-readable one-line description of a single step config's
+        actual parameters, e.g. "Band-pass Filter: 50-450 Hz, order 2
+        (Butterworth, zero-phase)". Returns None for a disabled step or for
+        the SUMMARY step (a metric-computation marker, not a processing
+        operation) -- callers should skip those rather than list them.
+        """
+        if s.id == emgConfigEnum.SUMMARY:
+            return None
+        if not getattr(s, "enable", True):
+            return None
+
+        if s.id == emgConfigEnum.DC_OFFSET:
+            return "Remove DC Offset"
+        if s.id == emgConfigEnum.FULL_W_RECT:
+            return "Full-Wave Rectification"
+        if s.id == emgConfigEnum.FILTER:
+            if int(s.type) == int(emgFilterEnum.LOW_PASS):
+                return "Low-pass Filter: {:g} Hz, order {} (Butterworth, zero-phase)".format(
+                    s.cutoff_l, s.order
+                )
+            return "Band-pass Filter: {:g}-{:g} Hz, order {} (Butterworth, zero-phase)".format(
+                s.cutoff_l, s.cutoff_h, s.order
+            )
+        if s.id == emgConfigEnum.NORMALIZATION:
+            norm_name = "MVC" if int(s.norm_type) == int(emgNormTypeEnum.MVC) else "Trial Max"
+            return "Normalization: {}".format(norm_name)
+        if s.id == emgConfigEnum.ACTIVATION:
+            return "Onset/Offset Detection: threshold {:g}, {} samples above / {} below".format(
+                s.threhold, s.n_above, s.n_below
+            )
+        return None
+
+    def describePipeline(self):
+        """Ordered list of human-readable descriptions of every enabled
+        step (skips disabled steps and the SUMMARY placeholder, see
+        describeStep) -- for methods reporting (see
+        workspace.saveReport's <name>_methods.txt)."""
+        return [d for d in (self.describeStep(s) for s in self.stepConfig) if d is not None]
+
     def size(self):
         return len(self.stepConfig)
 

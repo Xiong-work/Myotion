@@ -338,32 +338,21 @@ class workspace:
 
             # Per-channel summary metrics — one row per channel, all 13 TD metrics.
             # Written at report-save time so the Stats module can load them instantly
-            # without reprocessing the full signal.
-            import scipy.stats as _ss
+            # without reprocessing the full signal. Shared formulas with the
+            # per-cycle <name>_summary_cycles.csv (see td_metrics.compute_td_metrics
+            # and main.py's applyCyclesTimeDomainSummary) so whole-trial and
+            # per-cycle summaries of the same channel are directly comparable.
+            from .td_metrics import compute_td_metrics
             import pandas as _pd
             _summary_rows = []
             for _col in enabled_chans:
                 _arr = emgdf[_col].to_numpy(dtype=float)
                 if len(_arr) == 0:
                     continue
-                _zc = int(np.sum(np.diff(np.sign(_arr)) != 0))
-                _n = len(_arr)
                 _summary_rows.append({
                     'Participant': person.name,
                     'Channel':    _col,
-                    'min':        round(float(_arr.min()),                            6),
-                    'max':        round(float(_arr.max()),                            6),
-                    'mean':       round(float(_arr.mean()),                           6),
-                    'median':     round(float(np.median(_arr)),                       6),
-                    'std':        round(float(_arr.std(ddof=1)) if _n > 1 else 0.0,  6),
-                    'var':        round(float(_arr.var(ddof=1)) if _n > 1 else 0.0,  6),
-                    'ptp':        round(float(np.ptp(_arr)),                          6),
-                    'zc':         _zc,
-                    'auc':        round(float(np.trapz(np.abs(_arr), dx=1.0 / fs)),  6),
-                    'rms':        round(float(np.sqrt(np.mean(_arr ** 2))),           6),
-                    'mav':        round(float(np.mean(np.abs(_arr))),                 6),
-                    'skewness':   round(float(_ss.skew(_arr)),                        6),
-                    'kurtosis':   round(float(_ss.kurtosis(_arr)),                    6),
+                    **compute_td_metrics(_arr, fs),
                 })
             if _summary_rows:
                 _shdr = (
@@ -377,6 +366,30 @@ class workspace:
                 with open(_summary_name, "w", encoding="utf-8", newline="") as f:
                     f.write(_shdr)
                     _pd.DataFrame(_summary_rows).to_csv(f, index=False)
+
+            # Human-readable processing-methods report: only the enabled
+            # pipeline steps and their actual parameters, for citing in a
+            # paper/tech report -- separate from the .rpt XML, which also
+            # carries the raw filtered signal as a load-time fallback (see
+            # workspace.emgAsyncLoader) and isn't meant to be read directly.
+            _methods_lines = [
+                "Participant: {}".format(person.name),
+                "Sample frequency: {} Hz".format(fs),
+                "Channels: {}".format(", ".join(enabled_chans)),
+                "Analysis segment: {:.3f} s - {:.3f} s".format(seg_start, seg_end),
+                "",
+                "Processing pipeline (in order):",
+            ]
+            _pipeline_steps = emg.processCFG.describePipeline()
+            if _pipeline_steps:
+                for _i, _desc in enumerate(_pipeline_steps, start=1):
+                    _methods_lines.append("  {}. {}".format(_i, _desc))
+            else:
+                _methods_lines.append("  (no processing steps enabled)")
+
+            _methods_name = os.path.join(participant_dir, person.name + "_methods.txt")
+            with open(_methods_name, "w", encoding="utf-8") as f:
+                f.write("\n".join(_methods_lines) + "\n")
 
             # MVC csv — only channels that have actual MVC data loaded
             if emg.emgMVCTST and len(emg.emgMVCTST.data) > 0:

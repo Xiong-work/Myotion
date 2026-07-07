@@ -9,18 +9,20 @@ and renders interactive plotly charts via a local QWebEngineView.
 
 import os as _os
 import csv as _csv
+import json as _json
 import pandas as pd
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QSplitter, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QComboBox, QLineEdit, QListWidget, QListWidgetItem,
-    QTableWidget, QTableWidgetItem, QHeaderView,
+    QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
     QAbstractItemView, QFileDialog, QMessageBox, QDialog, QStackedWidget,
 )
 
 from .summary_reader import (
-    load_workspace_summary, available_metrics, available_channels, METRIC_LABELS,
+    load_workspace_summary, load_workspace_cycle_summary,
+    available_metrics, available_channels, METRIC_LABELS,
 )
 from .stat_tests import run_comparison, describe_groups
 from .chart_builder import build_chart
@@ -28,6 +30,7 @@ from .chart_view import StatsChartView
 from .dataset import read_table, infer_columns
 from .import_dialog import ImportColumnDialog
 from .imported_panel import ImportedAnalysisPanel
+from modules.pyMotion.core.batch_io import compute_cycle_td_summaries
 
 
 # ── Main widget ───────────────────────────────────────────────────────────────
@@ -90,8 +93,8 @@ class StatsWidget(QWidget):
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(200)
-        panel.setMaximumWidth(260)
+        panel.setMinimumWidth(220)
+        panel.setMaximumWidth(280)
         panel.setStyleSheet("background:#282a36;")
         vl = QVBoxLayout(panel)
         vl.setContentsMargins(8, 10, 8, 8)
@@ -104,6 +107,27 @@ class StatsWidget(QWidget):
         )
         self._source_label.setWordWrap(True)
         vl.addWidget(self._source_label)
+
+        tabs = QTabWidget()
+        tabs.setStyleSheet(
+            "QTabWidget::pane{border:none;background:#282a36;}"
+            "QTabBar::tab{background:#1e1f28;color:#6272a4;padding:5px 10px;"
+            "font-size:11px;}"
+            "QTabBar::tab:selected{background:#44475a;color:#f8f8f2;}"
+        )
+        tabs.addTab(self._build_workspace_tab(), "Workspace")
+        tabs.addTab(self._build_external_tab(), "External Data")
+        vl.addWidget(tabs, stretch=1)
+
+        return panel
+
+    def _build_workspace_tab(self) -> QWidget:
+        """Grouping + workspace-derived data actions: everything that reads
+        from the currently loaded workspace path (self._workspace_path)."""
+        tab = QWidget()
+        vl = QVBoxLayout(tab)
+        vl.setContentsMargins(0, 6, 0, 0)
+        vl.setSpacing(6)
 
         group_hint = self._lbl(
             "Name a group, check which participants belong to it, then Add "
@@ -163,6 +187,50 @@ class StatsWidget(QWidget):
         btn_refresh.clicked.connect(self._reload_data)
         vl.addWidget(btn_refresh)
 
+        btn_cycle_summaries = QPushButton("Compute Cycle Summaries")
+        btn_cycle_summaries.setStyleSheet(
+            "QPushButton{background:#44475a;color:#f8f8f2;border-radius:4px;"
+            "padding:5px;font-size:12px;border:none;}"
+            "QPushButton:hover{background:#6272a4;}"
+        )
+        btn_cycle_summaries.setCursor(Qt.PointingHandCursor)
+        btn_cycle_summaries.setToolTip(
+            "Batch-compute per-cycle time-domain summaries (_summary_cycles.csv) "
+            "for every participant folder in this workspace, using cycles/events "
+            "exported from Kinematics Inspection. Required before Create Feature "
+            "Table can include per-cycle data."
+        )
+        btn_cycle_summaries.clicked.connect(self._compute_cycle_summaries)
+        vl.addWidget(btn_cycle_summaries)
+
+        btn_feature_table = QPushButton("Create Feature Table…")
+        btn_feature_table.setStyleSheet(
+            "QPushButton{background:#44475a;color:#f8f8f2;border-radius:4px;"
+            "padding:5px;font-size:12px;border:none;}"
+            "QPushButton:hover{background:#6272a4;}"
+        )
+        btn_feature_table.setCursor(Qt.PointingHandCursor)
+        btn_feature_table.clicked.connect(self._create_feature_table)
+        vl.addWidget(btn_feature_table)
+
+        return tab
+
+    def _build_external_tab(self) -> QWidget:
+        """Hand-imported external data files -- independent of any loaded
+        workspace (see _import_external_file / _load_dataframe_into_import_flow)."""
+        tab = QWidget()
+        vl = QVBoxLayout(tab)
+        vl.setContentsMargins(0, 6, 0, 0)
+        vl.setSpacing(6)
+
+        hint = self._lbl(
+            "Import a CSV/Excel file with its own subject/within/between "
+            "columns -- independent of any loaded workspace.",
+            color="#6272a4", size=10,
+        )
+        hint.setWordWrap(True)
+        vl.addWidget(hint)
+
         btn_import = QPushButton("Import Data File…")
         btn_import.setStyleSheet(
             "QPushButton{background:#44475a;color:#f8f8f2;border-radius:4px;"
@@ -173,7 +241,14 @@ class StatsWidget(QWidget):
         btn_import.clicked.connect(self._import_external_file)
         vl.addWidget(btn_import)
 
-        return panel
+        vl.addWidget(self._lbl("Imported subjects", color="#6272a4", size=10))
+        self._imported_subjects_list = QListWidget()
+        self._imported_subjects_list.setStyleSheet(
+            "QListWidget{background:#1e1f28;color:#f8f8f2;border:none;font-size:12px;}"
+        )
+        vl.addWidget(self._imported_subjects_list, stretch=1)
+
+        return tab
 
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
@@ -310,10 +385,42 @@ class StatsWidget(QWidget):
             self._chart_view.show_placeholder("No workspace loaded.")
             return
         self._df = load_workspace_summary(self._workspace_path)
+        self._groups = self._load_persisted_groups()
         self._set_source_label(f"Workspace: {_os.path.basename(self._workspace_path)}")
         self._refresh_participant_list()
         self._refresh_combos()
         self._update_chart()
+
+    # ── group persistence ────────────────────────────────────────────────────
+    # Group assignments are saved to <workspace>/stats_groups.json on every
+    # change and reloaded on _reload_data(), so the Add-Group work in this
+    # tab survives across sessions instead of needing to be redone each time.
+
+    def _groups_path(self):
+        if not self._workspace_path:
+            return None
+        return _os.path.join(self._workspace_path, "stats_groups.json")
+
+    def _load_persisted_groups(self) -> dict:
+        path = self._groups_path()
+        if not path or not _os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_persisted_groups(self):
+        path = self._groups_path()
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(self._groups, f, indent=2)
+        except Exception:
+            pass
 
     def _set_source_label(self, text: str):
         self._data_source_label = text
@@ -332,12 +439,22 @@ class StatsWidget(QWidget):
             QMessageBox.critical(self, "Import Error", str(e))
             return
 
+        self._load_dataframe_into_import_flow(df, _os.path.basename(path))
+
+    def _load_dataframe_into_import_flow(self, df: pd.DataFrame, source_label: str):
+        """Shared tail end of _import_external_file() and
+        _create_feature_table(): pick subject/within/between/DV roles via
+        ImportColumnDialog, then hand the result to ImportedAnalysisPanel --
+        so a feature table built in-memory from the workspace gets the same
+        pingouin-backed within/between/mixed analysis (with effect sizes and
+        Holm-corrected pairwise tests) as a hand-imported file, instead of a
+        second parallel analysis path."""
         non_numeric, numeric = infer_columns(df)
         if not numeric:
-            QMessageBox.warning(self, "Import", "No numeric columns found in this file.")
+            QMessageBox.warning(self, "Import", "No numeric columns found in this data.")
             return
 
-        dialog = ImportColumnDialog(df, non_numeric, numeric, _os.path.basename(path), self)
+        dialog = ImportColumnDialog(df, non_numeric, numeric, source_label, self)
         if dialog.exec() != QDialog.Accepted:
             return
 
@@ -356,6 +473,134 @@ class StatsWidget(QWidget):
         self._imported_panel = ImportedAnalysisPanel(dataset)
         self._right_stack.addWidget(self._imported_panel)
         self._right_stack.setCurrentWidget(self._imported_panel)
+
+    def _compute_cycle_summaries(self):
+        """Batch-compute per-cycle time-domain summaries for every
+        participant folder in the current workspace (see
+        batch_io.compute_cycle_td_summaries) -- purely disk-based, reads
+        each participant's own already-exported _emg_processed.csv +
+        _Events.csv and writes _summary_cycles.csv next to them. Doesn't
+        touch _summary.csv or the chart/group-comparison view (self._df)."""
+        if not self._workspace_path:
+            QMessageBox.information(
+                self, "Compute Cycle Summaries", "Load a workspace first.",
+            )
+            return
+
+        saved_paths, warnings = compute_cycle_td_summaries(self._workspace_path)
+        if warnings:
+            QMessageBox.warning(self, "Compute Cycle Summaries", "\n".join(warnings))
+        if saved_paths:
+            QMessageBox.information(
+                self, "Compute Cycle Summaries",
+                "Per-cycle time-domain summary saved for {} participant(s).".format(
+                    len(saved_paths)
+                ),
+            )
+        elif not warnings:
+            QMessageBox.information(
+                self, "Compute Cycle Summaries",
+                "No participants with a saved report (_emg_processed.csv) found.",
+            )
+
+    def _build_feature_table_from_cycle_summary(self, cycle_df: pd.DataFrame) -> pd.DataFrame:
+        """Wide-format (SPSS-style) feature table: one row per Participant,
+        one column per Channel x metric (e.g. "Ch1_rms", "Ch1_mav", ...) --
+        or "Task_Channel_metric" when cycle_df spans more than one task --
+        averaged across that participant's cycles/segments (see
+        summary_reader.load_workspace_cycle_summary). Participants missing
+        a given channel/metric get NaN there rather than being dropped."""
+        metric_cols = available_metrics(cycle_df)
+        has_task = "Task" in cycle_df.columns and cycle_df["Task"].nunique() > 1
+        pivot_cols = ["Task", "Channel"] if has_task else ["Channel"]
+        wide = cycle_df.pivot_table(index="Participant", columns=pivot_cols, values=metric_cols)
+        if has_task:
+            wide.columns = [
+                "{}_{}_{}".format(task, chan, metric) for metric, task, chan in wide.columns
+            ]
+        else:
+            wide.columns = ["{}_{}".format(chan, metric) for metric, chan in wide.columns]
+        return wide.reset_index()
+
+    def _merge_cci_export(self, wide_df: pd.DataFrame, path: str) -> pd.DataFrame:
+        """Left-join one Advanced EMG CCI export (columns: Trial, "CCI (A vs
+        B)") onto wide_df by Participant. Trial values are stripped of any
+        "Group/" prefix (Advanced EMG's grouped-dataset trial naming) before
+        joining, since the feature table is keyed by bare Participant name."""
+        try:
+            cci_df = pd.read_csv(path)
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Import CCI", "Could not read {}: {}".format(_os.path.basename(path), e)
+            )
+            return wide_df
+
+        if "Trial" not in cci_df.columns:
+            QMessageBox.warning(
+                self, "Import CCI",
+                "{} doesn't look like a CCI export (no 'Trial' column).".format(
+                    _os.path.basename(path)
+                ),
+            )
+            return wide_df
+
+        cci_cols = [c for c in cci_df.columns if c != "Trial"]
+        if not cci_cols:
+            return wide_df
+
+        cci_df = cci_df.copy()
+        cci_df["Participant"] = cci_df["Trial"].astype(str).str.rsplit("/", n=1).str[-1]
+        return wide_df.merge(cci_df[["Participant"] + cci_cols], on="Participant", how="left")
+
+    def _create_feature_table(self):
+        """Build a wide-format (SPSS-style) feature table straight from each
+        participant's own on-disk exports -- _summary_cycles.csv (see
+        "Compute Cycle Summaries") plus optional _freq_analysis_events.csv,
+        averaged per participant (summary_reader.load_workspace_cycle_
+        summary) -- not the whole-trial-only self._df, since cycles/events
+        are what should actually be summarized here. Optionally merges in
+        CCI export(s) from Advanced EMG, then hands the result to the same
+        subject/within/between/DV role picker + pingouin-backed analysis
+        panel a hand-imported file gets (see _load_dataframe_into_import_flow)."""
+        if not self._workspace_path:
+            QMessageBox.information(
+                self, "Create Feature Table", "Load a workspace first (Refresh Data).",
+            )
+            return
+
+        cycle_df = load_workspace_cycle_summary(self._workspace_path)
+        if cycle_df.empty:
+            QMessageBox.information(
+                self, "Create Feature Table",
+                "No _summary_cycles.csv files found. Run \"Compute Cycle "
+                "Summaries\" first (requires each participant's saved report "
+                "and exported cycle events from Kinematics Inspection).",
+            )
+            return
+
+        feature_df = self._build_feature_table_from_cycle_summary(cycle_df)
+
+        # Carry over the groups defined in the "Workspace" tab (Add Group) as
+        # a real "Group" column, so it shows up as a Between-subjects factor
+        # choice in the next dialog -- without this, groups assigned here
+        # would otherwise have no way to reach the pingouin analysis.
+        if self._groups:
+            feature_df = feature_df.copy()
+            feature_df["Group"] = feature_df["Participant"].map(self._groups).fillna("Ungrouped")
+
+        reply = QMessageBox.question(
+            self, "Create Feature Table",
+            "Merge in Co-contraction Index (CCI) export(s) from Advanced EMG?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, "Select CCI Export CSV(s)", "", "CSV Files (*.csv)"
+            )
+            for path in paths:
+                feature_df = self._merge_cci_export(feature_df, path)
+
+        self._load_dataframe_into_import_flow(feature_df, "Feature Table (workspace)")
 
     def _refresh_participant_list(self):
         """Rebuild the "Available participants" checklist from the current
@@ -382,15 +627,15 @@ class StatsWidget(QWidget):
         self._refresh_groups_summary()
 
     def _refresh_participant_list_for_subjects(self, subjects: list):
-        """Read-only subject list for imported data — grouping comes from the
-        chosen within/between factor columns, not manual per-subject tagging."""
-        self._participant_list.clear()
-        self._groups_summary_list.clear()
-        self._groups.clear()
+        """Read-only subject list shown in the "External Data" tab --
+        grouping for imported data comes from the chosen within/between
+        factor columns, not manual per-subject tagging, so this is display
+        only and doesn't touch the "Workspace" tab's grouping state."""
+        self._imported_subjects_list.clear()
         for name in subjects:
             item = QListWidgetItem(str(name))
             item.setFlags(item.flags() & ~Qt.ItemIsUserCheckable)
-            self._participant_list.addItem(item)
+            self._imported_subjects_list.addItem(item)
 
     def _refresh_groups_summary(self):
         self._groups_summary_list.clear()
@@ -418,11 +663,13 @@ class StatsWidget(QWidget):
         for name in checked:
             self._groups[name] = group_name
         self._group_name_edit.clear()
+        self._save_persisted_groups()
         self._refresh_participant_list()
         self._update_chart()
 
     def _clear_groups(self):
         self._groups.clear()
+        self._save_persisted_groups()
         self._refresh_participant_list()
         self._update_chart()
 
@@ -563,6 +810,8 @@ class StatsWidget(QWidget):
         stat   = result.get("statistic", float("nan"))
         sig    = result.get("significant", False)
         normal = result.get("all_normal", True)
+        eff        = result.get("effect_size")
+        eff_name   = result.get("effect_size_name", "")
 
         sig_html = (
             "<span style='color:#26de81'><b>✔ Significant</b></span>"
@@ -574,8 +823,11 @@ class StatsWidget(QWidget):
             if normal else
             "Normality: ≥1 group failed Shapiro-Wilk → non-parametric test."
         )
+        eff_line = ""
+        if eff is not None:
+            eff_line = f"<br>{eff_name} = {eff:.4f}"
         self._result_summary.setText(
-            f"<b>{test}</b>: statistic = {stat:.4f},  p = {p:.4f}  |  {sig_html}<br>"
+            f"<b>{test}</b>: statistic = {stat:.4f},  p = {p:.4f}  |  {sig_html}{eff_line}<br>"
             f"<span style='color:#6272a4;font-size:11px'>{norm_note}</span>"
         )
 
@@ -638,6 +890,9 @@ class StatsWidget(QWidget):
                 w.writerow(["Statistic", f"{result.get('statistic', float('nan')):.6f}"])
                 w.writerow(["p-value",   f"{result.get('p_value',   float('nan')):.6f}"])
                 w.writerow(["Significant", "Yes" if result.get("significant") else "No"])
+                if result.get("effect_size") is not None:
+                    w.writerow([result.get("effect_size_name", "Effect size"),
+                                f"{result['effect_size']:.6f}"])
                 w.writerow([])
                 w.writerow(["Group", "N", "Mean", "Std Dev", "Median"])
                 for g, d in desc.items():
