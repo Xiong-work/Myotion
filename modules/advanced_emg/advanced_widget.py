@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 import os
+import json
 
 import numpy as np
 import plotly.graph_objects as go
@@ -707,13 +708,46 @@ class AdvancedAnalysisWidget(QWidget):
         for name in checked:
             self._ws_groups[name] = group_name
         self._ws_group_name_edit.clear()
+        self._save_persisted_ws_groups()
         self._refresh_ws_participant_list()
         self._refresh_ws_groups_list()
 
     def _clear_ws_groups(self):
         self._ws_groups.clear()
+        self._save_persisted_ws_groups()
         self._refresh_ws_participant_list()
         self._refresh_ws_groups_list()
+
+    # ── group persistence ────────────────────────────────────────────────
+    # Group assignments are saved to <workspace>/advanced_emg_groups.json on
+    # every change and reloaded on on_workspace_changed(), so the Add-Group
+    # work here survives across sessions instead of needing to be redone.
+
+    def _ws_groups_path(self):
+        if not self._ws_path:
+            return None
+        return os.path.join(self._ws_path, "advanced_emg_groups.json")
+
+    def _load_persisted_ws_groups(self) -> dict:
+        path = self._ws_groups_path()
+        if not path or not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_persisted_ws_groups(self):
+        path = self._ws_groups_path()
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._ws_groups, f, indent=2)
+        except Exception:
+            pass
 
     def on_workspace_changed(self, ws, path):
         """Called from main.py when a workspace is created/loaded/cleared --
@@ -721,6 +755,7 @@ class AdvancedAnalysisWidget(QWidget):
         current participants/cycles, not a snapshot from load time."""
         self._ws = ws
         self._ws_path = path
+        self._ws_groups = self._load_persisted_ws_groups()
         self._refresh_ws_participant_list()
         self._refresh_ws_groups_list()
         if ws is None or not getattr(ws, "participants", None):

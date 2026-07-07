@@ -20,7 +20,7 @@ import pandas as pd
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QFormLayout, QLabel, QComboBox,
+    QDialog, QVBoxLayout, QFormLayout, QLabel, QComboBox, QCheckBox,
     QListWidget, QListWidgetItem, QDialogButtonBox, QMessageBox,
 )
 
@@ -80,6 +80,11 @@ class ImportColumnDialog(QDialog):
         layout.addLayout(form)
 
         layout.addWidget(QLabel("Outcome (DV) columns — numeric:"))
+
+        self._select_all_dvs = QCheckBox("Select all")
+        self._select_all_dvs.stateChanged.connect(self._on_select_all_toggled)
+        layout.addWidget(self._select_all_dvs)
+
         self._dv_list = QListWidget()
         self._dv_list.setSelectionMode(QListWidget.NoSelection)
         for c in numeric_cols:
@@ -87,6 +92,7 @@ class ImportColumnDialog(QDialog):
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
             self._dv_list.addItem(item)
+        self._dv_list.itemChanged.connect(self._on_dv_item_changed)
         layout.addWidget(self._dv_list)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -95,6 +101,27 @@ class ImportColumnDialog(QDialog):
         layout.addWidget(buttons)
 
         self._dataset: ExternalDataset | None = None
+        self._syncing_select_all = False
+
+    def _on_select_all_toggled(self, state):
+        if self._syncing_select_all:
+            return
+        check = Qt.Checked if state != 0 else Qt.Unchecked
+        self._syncing_select_all = True
+        for i in range(self._dv_list.count()):
+            self._dv_list.item(i).setCheckState(check)
+        self._syncing_select_all = False
+
+    def _on_dv_item_changed(self, _item):
+        if self._syncing_select_all:
+            return
+        all_checked = all(
+            self._dv_list.item(i).checkState() == Qt.Checked
+            for i in range(self._dv_list.count())
+        )
+        self._syncing_select_all = True
+        self._select_all_dvs.setCheckState(Qt.Checked if all_checked else Qt.Unchecked)
+        self._syncing_select_all = False
 
     def _checked_dvs(self) -> list:
         return [

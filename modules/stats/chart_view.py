@@ -54,3 +54,20 @@ class StatsChartView(QWebEngineView):
     def show_placeholder(self, msg: str = ""):
         self._handler.set_html(empty_html(msg))
         self.setUrl(self._url)
+
+    def showEvent(self, event):
+        """Stats tabs are built once at app start, often while still hidden
+        inside a QStackedWidget/QSplitter with a zero-size viewport -- Plotly
+        can end up laying out its chart into that zero-size container and
+        never repainting once the tab actually becomes visible. Nudging the
+        page with a resize event once we're actually shown makes Plotly
+        recompute its layout against the real (non-zero) size."""
+        super().showEvent(event)
+        self.page().runJavaScript(
+            "window.dispatchEvent(new Event('resize'));"
+            "if (window.Plotly) {"
+            "  document.querySelectorAll('.js-plotly-plot').forEach("
+            "    function(gd) { Plotly.Plots.resize(gd); }"
+            "  );"
+            "}"
+        )

@@ -24,6 +24,12 @@ in-memory workspace (extra_events in a live session can be lost well before
 Prep Data runs -- toggling Detect Cycles off clears that task's events,
 reloading the workspace discards unsaved ones, etc. -- so the on-disk
 exports are the durable source of truth, not from_workspace()'s live read).
+
+compute_cycle_td_summaries() is what the Stats module's "Compute Cycle
+Summaries" button uses: same on-disk-only philosophy as prep_data_adv_from_
+workspace(), but it doesn't even take a workspace object -- Stats only ever
+holds a workspace *path* (never a live in-memory workspace), so this scans
+that directory for participant subfolders itself.
 """
 
 import csv
@@ -434,3 +440,97 @@ def prep_data_adv_from_workspace(ws, workspace_dir, dest_dirname="Data_Adv", gro
                 w.writerow([t_start, t_end])
 
     return dest_dir, warnings, grouped
+
+
+def compute_cycle_td_summaries(workspace_dir):
+    """Batch-compute per-cycle time-domain summary metrics for every
+    participant folder found directly under workspace_dir, reading only
+    each participant's own already-exported files on disk:
+
+      - <name>_emg_processed.csv (workspace.saveReport()) for the processed
+        EMG channels and their (absolute-trial-time) "Time (s)" column.
+      - <name>_Events.csv's "# Cycles" section (or, for older exports, the
+        CycleStart_/CycleEnd_ rows in its flat "# Events" section -- see
+        _parse_events_section_cycles) for cycle boundaries, kept per task.
+        Falls back to the whole processed segment as a single "Whole trial"
+        cycle if no cycle events are found at all.
+
+    Writes <name>_summary_cycles.csv (columns: Task, Channel, Cycle,
+    Start (s), End (s), + all TD metrics) into each participant's own
+    workspace folder. Purely additive: does not touch <name>_summary.csv
+    (the whole-trial summary) or any single-trial processing. Participant
+    folders without an _emg_processed.csv are silently skipped (not yet
+    batch-processed/saved).
+
+    Returns (saved_paths, warnings).
+    """
+    from .td_metrics import compute_td_metrics, TD_METRIC_KEYS
+
+    workspace_dir = Path(workspace_dir)
+    fieldnames = ["Task", "Channel", "Cycle", "Start (s)", "End (s)"] + TD_METRIC_KEYS
+
+    saved_paths = []
+    warnings = []
+    if not workspace_dir.is_dir():
+        return saved_paths, warnings
+
+    for entry in sorted(p for p in workspace_dir.iterdir() if p.is_dir()):
+        name = entry.name
+        emg_csv = entry / f"{name}_emg_processed.csv"
+        if not emg_csv.is_file():
+            continue
+
+        data_lines = [
+            ln for ln in emg_csv.read_text(encoding="utf-8").splitlines()
+            if not ln.lstrip().startswith("#")
+        ]
+        if len(data_lines) < 3:  # header + at least 2 samples (for a time step)
+            warnings.append(f"'{name}': {emg_csv.name} has too few data rows, skipped")
+            continue
+
+        df = pd.read_csv(io.StringIO("\n".join(data_lines)))
+        time = df.iloc[:, 0].to_numpy(dtype=float)
+        fs = round(1.0 / float(np.mean(np.diff(time))))
+        channels = list(df.columns[1:])
+
+        events_csv = entry / f"{name}_Events.csv"
+        by_task = _read_cycles_section(events_csv) or _parse_events_section_cycles(events_csv)
+        if not by_task:
+            by_task = {"Whole trial": [(float(time[0]), float(time[-1]))]}
+            warnings.append(
+                f"'{name}': no cycles found in its Events export -- "
+                "used the whole processed segment as one cycle"
+            )
+
+        rows = []
+        for task, cycles in by_task.items():
+            for chan in channels:
+                arr_full = df[chan].to_numpy(dtype=float)
+                for i, (t_start, t_end) in enumerate(cycles, start=1):
+                    i_start = max(0, min(len(arr_full), int(round((t_start - time[0]) * fs))))
+                    i_end   = max(0, min(len(arr_full), int(round((t_end   - time[0]) * fs))))
+                    row = {
+                        "Task": task, "Channel": chan, "Cycle": i,
+                        "Start (s)": round(t_start, 4), "End (s)": round(t_end, 4),
+                    }
+                    row.update(compute_td_metrics(arr_full[i_start:i_end], fs))
+                    rows.append(row)
+
+        if not rows:
+            continue
+
+        save_path = entry / f"{name}_summary_cycles.csv"
+        header = (
+            f"# Participant: {name}\n"
+            f"# Sample frequency: {fs} Hz\n"
+            "# Cycles: from Events.csv Cycles section (Kinematics Inspection), "
+            "falling back to the whole processed segment\n"
+        )
+        with open(save_path, "w", encoding="utf-8", newline="") as f:
+            f.write(header)
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        saved_paths.append(str(save_path))
+
+    return saved_paths, warnings
